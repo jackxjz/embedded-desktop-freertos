@@ -1,0 +1,16 @@
+CMake Error at D:/esp-idf/v5.3.3/v5.3.3/esp-idf/tools/cmake/build.cmake:572 (message):
+  ERROR: The "path" field in the manifest file
+  "E:\ESP32-S3-Touch-LCD-7-Demo\ESP32-S3-Touch-LCD-7-Demo\ESP-IDF\08_lvgl_Porting\components\espressif__esp_lcd_touch\idf_component.yml"
+  does not point to a directory.  You can safely remove this field from the
+  manifest if this project is an example copied from a component repository.
+  The dependency will be downloaded from the ESP component registry.
+  Documentation:
+  https://docs.espressif.com/projects/idf-component-manager/en/latest/reference/manifest_file.html#override-path
+
+
+Call Stack (most recent call first):
+  D:/esp-idf/v5.3.3/v5.3.3/esp-idf/tools/cmake/project.cmake:717 (idf_build_process)
+  CMakeLists.txt:8 (project)
+
+
+ninja: error: rebuilding 'build.ninja': subcommand failed
