@@ -1,7 +1,6 @@
-<<<<<<< HEAD
 # embedded-desktop-freertos
 ESP32 上的 FreeRTOS 桌面操作系统模拟器
-=======
+
 | Supported Targets | ESP32-S3 |
 | ----------------- | -------- |
 
@@ -81,4 +80,3 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 ## Troubleshooting
 
 For any technical queries, please open an [issue](https://github.com/espressif/esp-iot-solution/issues) on GitHub. We will get back to you soon.
->>>>>>> 792ec03 (feat(auth): implement login and registration pages)
