@@ -41,6 +41,9 @@ void ui_init(void);
 void ui_destroy(void);
 void show_message_box(const char *title, const char *message);
 
+// 鼠标光标对象(在 ui_init 内创建并绑定到触摸输入设备)
+extern lv_obj_t * ui_cursor;
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

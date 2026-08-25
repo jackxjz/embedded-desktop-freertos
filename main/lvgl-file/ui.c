@@ -5,11 +5,15 @@
 
 #include "ui.h"
 #include "ui_helpers.h"
+#include "../lvgl_port.h"
 
 ///////////////////// VARIABLES ////////////////////
 
 // EVENTS
 lv_obj_t * ui____initial_actions0;
+
+// 鼠标光标对象(全局,可在外部引用)
+lv_obj_t * ui_cursor = NULL;
 
 // IMAGES AND IMAGE SETS
 
@@ -39,6 +43,27 @@ void ui_init(void)
     ui_Screen4_screen_init();
     ui____initial_actions0 = lv_obj_create(NULL);
     lv_disp_load_scr(ui_Screen1);
+
+    // 初始化鼠标光标:在顶层创建一个圆形指示器,绑定到触摸输入设备
+    // LVGL 会在触摸按下/移动时自动更新光标位置(点击哪里显示哪里,滑动也跟随)
+    ui_cursor = lv_obj_create(lv_layer_top());
+    lv_obj_clear_flag(ui_cursor, LV_OBJ_FLAG_SCROLLABLE);   // 光标本身不可滚动
+    lv_obj_set_size(ui_cursor, 16, 16);                      // 光标尺寸 16x16
+    lv_obj_set_style_radius(ui_cursor, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);  // 圆形
+    lv_obj_set_style_bg_opa(ui_cursor, LV_OPA_80, LV_PART_MAIN | LV_STATE_DEFAULT);         // 半透明填充
+    lv_obj_set_style_bg_color(ui_cursor, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);  // 黑色填充
+    lv_obj_set_style_border_color(ui_cursor, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);  // 白色边框
+    lv_obj_set_style_border_width(ui_cursor, 2, LV_PART_MAIN | LV_STATE_DEFAULT);            // 边框宽 2
+    lv_obj_set_style_outline_color(ui_cursor, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_outline_width(ui_cursor, 1, LV_PART_MAIN | LV_STATE_DEFAULT);           // 外描边增强对比
+
+    // 将光标绑定到触摸输入设备(LVGL 会自动跟随触摸点)
+    if (g_lvgl_indev != NULL) {
+        lv_indev_set_cursor(g_lvgl_indev, ui_cursor);
+    }
+
+    // 初始位置设到屏幕中心(LVGL_PORT_H_RES/V_RES 在 lvgl_port.h 中定义)
+    lv_obj_set_pos(ui_cursor, LVGL_PORT_H_RES / 2 - 8, LVGL_PORT_V_RES / 2 - 8);
 }
 
 void ui_destroy(void)
