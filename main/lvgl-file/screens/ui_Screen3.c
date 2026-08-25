@@ -6,29 +6,1015 @@
 #include "../ui.h"
 #include "../../spiffs.h"
 #include "../../nvs.h"
+#include "../../lvgl_port.h"
+#include <stdio.h>      //【新增】用于文件操作
+#include <stdlib.h>     //【新增】用于 atoi
+#include <string.h>     //【新增】
 
 lv_obj_t * ui_Screen3 = NULL;
 lv_obj_t * ui_exitbtu1 = NULL;
 lv_obj_t * ui_Label4 = NULL;
+
+// 桌面相关对象
+lv_obj_t * ui_file_container = NULL;          // 文件图标容器(从左上角排列,不可滚动)
+lv_obj_t * ui_desktop_kb = NULL;              // 桌面键盘(用于输入文件名/文件内容)
+static lv_obj_t * selected_file_icon = NULL;  // 当前选中的文件图标
+static lv_style_t style_icon_selected;        // 选中样式(应用到图标方块上)
+static bool style_inited = false;             // 样式是否已初始化
+
+// 【新增】桌面长按滑动检测变量
+static bool desktop_press_moved = false;
+static lv_coord_t desktop_press_start_x = 0;
+static lv_coord_t desktop_press_start_y = 0;
+#define DESKTOP_LONG_PRESS_MOVE_THRESHOLD 2    // 移动超过2像素就判定为滑动，禁止弹出桌面长按菜单
+
+// 新建文件对话框相关对象
+static lv_obj_t * newfile_panel = NULL;        // 新建文件面板
+static lv_obj_t * newfile_ta = NULL;           // 文件名输入框
+
+// 打开文件对话框相关对象
+static lv_obj_t * openfile_panel = NULL;       // 打开文件面板
+static lv_obj_t * openfile_ta = NULL;          // 文件内容编辑框
+static char openfile_name[USER_FILE_NAME_MAX] = {0};  // 当前打开的文件名
+static char openfile_original_content[1024];   // 打开时读到的原始内容,用于脏检查
+static bool openfile_dirty = false;            // 文件内容是否被修改(未保存)
+
+// 删除确认对话框相关对象
+static lv_obj_t * delete_msgbox = NULL;       // 删除确认消息框
+static char delete_target_name[USER_FILE_NAME_MAX] = {0};  // 待删除的文件名
+
+// 右键菜单(上下文菜单)相关对象
+static lv_obj_t * context_menu = NULL;        // 菜单面板
+static lv_obj_t * context_menu_bg = NULL;     // 全屏透明背景(点击关闭菜单)
+static char context_menu_file_name[USER_FILE_NAME_MAX] = {0};  // 菜单关联的文件名(空=桌面)
+
+// 图标拖动状态(同一时间只支持拖动一个图标)
+static lv_obj_t * dragging_icon = NULL;       // 正在拖动的图标(没有则 NULL)
+static lv_coord_t drag_start_x = 0;           // 按下时触摸点(用于计算偏移)
+static lv_coord_t drag_start_y = 0;
+static lv_coord_t icon_start_x = 0;           // 按下时图标位置
+static lv_coord_t icon_start_y = 0;
+static bool drag_in_progress = false;          // 是否已进入拖动状态(长按触发)
+static bool long_press_handled = false;        // 长按已被处理(显示菜单或进入拖动),用于阻止后续 CLICKED
+
+// 【新增】图标位置持久化相关
+#define ICON_POSITION_FILE "/spiffs/icon_positions.txt"   // 存储坐标的文件
+#define MAX_ICON_COUNT USER_FILE_MAX_COUNT                // 最大图标数量
+typedef struct {
+    char name[USER_FILE_NAME_MAX];
+    lv_coord_t x;
+    lv_coord_t y;
+} icon_pos_t;
+static icon_pos_t icon_positions[MAX_ICON_COUNT];   // 加载的坐标表
+static int icon_pos_count = 0;                      // 有效坐标数量
+
+// 【新增】加载图标位置（从 SPIFFS 读取）
+static void load_icon_positions(void)
+{
+    icon_pos_count = 0;
+    FILE *fp = fopen(ICON_POSITION_FILE, "r");
+    if (fp == NULL) {
+        // 文件不存在，无需加载
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), fp) != NULL && icon_pos_count < MAX_ICON_COUNT) {
+        // 格式：name,x,y
+        char name[USER_FILE_NAME_MAX];
+        int x, y;
+        if (sscanf(line, "%[^,],%d,%d", name, &x, &y) == 3) {
+            strncpy(icon_positions[icon_pos_count].name, name, USER_FILE_NAME_MAX - 1);
+            icon_positions[icon_pos_count].name[USER_FILE_NAME_MAX - 1] = '\0';
+            icon_positions[icon_pos_count].x = x;
+            icon_positions[icon_pos_count].y = y;
+            icon_pos_count++;
+        }
+    }
+    fclose(fp);
+}
+
+// 【新增】保存所有图标位置到 SPIFFS
+static void save_icon_positions(void)
+{
+    if (ui_file_container == NULL) return;
+    FILE *fp = fopen(ICON_POSITION_FILE, "w");
+    if (fp == NULL) {
+        ESP_LOGE("DESKTOP", "无法创建坐标文件");
+        return;
+    }
+    uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
+    for (uint32_t i = 0; i < cnt; i++) {
+        lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
+        const char * name = (const char *)lv_obj_get_user_data(child);
+        if (name == NULL) continue;
+        lv_coord_t x = lv_obj_get_x(child);
+        lv_coord_t y = lv_obj_get_y(child);
+        fprintf(fp, "%s,%d,%d\n", name, x, y);
+    }
+    fclose(fp);
+}
+
+// 【新增】从坐标表中查询指定文件名的坐标，若存在则返回 true 并填充坐标
+static bool get_icon_position(const char *name, lv_coord_t *x, lv_coord_t *y)
+{
+    for (int i = 0; i < icon_pos_count; i++) {
+        if (strcmp(icon_positions[i].name, name) == 0) {
+            *x = icon_positions[i].x;
+            *y = icon_positions[i].y;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 前向声明
+static void desktop_pressed_cb(lv_event_t * e);
+static void desktop_pressing_cb(lv_event_t * e);
+static void desktop_long_press_cb(lv_event_t * e);
+static void file_icon_pressed_cb(lv_event_t * e);
+static void file_icon_pressing_cb(lv_event_t * e);
+static void file_icon_released_cb(lv_event_t * e);
+static void file_icon_clicked_cb(lv_event_t * e);
+static void file_icon_long_press_cb(lv_event_t * e);
+static void refresh_file_icons(void);
+static void show_new_file_dialog(void);
+static void show_delete_confirm(const char *name);
+static void show_open_file_dialog(const char *name);
+static void close_context_menu(void);
+static void show_context_menu(int x, int y, bool is_file, const char *file_name);
+static void clear_selection(void);
+
 // event funtions
-void ui_event_exitbtu1(lv_event_t * e)
+// void ui_event_exitbtu1(lv_event_t * e)
+// {
+//     lv_event_code_t event_code = lv_event_get_code(e);
+
+//     if(event_code == LV_EVENT_CLICKED) {
+//         char account[MAX_ACCOUNT_LENGTH] = {0};
+//         char password[MAX_PASSWORD_LENGTH] = {0};
+//         if(read_text_from_nvs(account, MAX_ACCOUNT_LENGTH, "acc") == ESP_OK)
+//         {
+//             if(read_text_from_nvs(password, MAX_PASSWORD_LENGTH, "pwd") == ESP_OK)
+//             {
+//                 lv_textarea_set_text(ui_zhanghao, account);
+//                 lv_textarea_set_text(ui_mima, password);
+//                 lv_obj_add_state(ui_jizhu, LV_STATE_CHECKED);
+//             }
+//         }
+//         _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen1_screen_init);
+//     }
+// }
+
+// 初始化选中样式(只初始化一次)
+static void init_icon_style(void)
+{
+    if (style_inited) return;
+    lv_style_init(&style_icon_selected);
+
+    // 深蓝实色背景，完全不透明
+    lv_style_set_bg_color(&style_icon_selected, lv_color_hex(0x1565C0));
+    lv_style_set_bg_opa(&style_icon_selected, LV_OPA_100);
+
+    // 更深的蓝色粗边框
+    lv_style_set_border_color(&style_icon_selected, lv_color_hex(0x0D47A1));
+    lv_style_set_border_width(&style_icon_selected, 10);
+
+    // 负边距，选中框向外放大一圈
+    lv_style_set_pad_all(&style_icon_selected, -20);
+
+    // 深蓝色外发光阴影
+    lv_style_set_shadow_width(&style_icon_selected, 18);
+    lv_style_set_shadow_color(&style_icon_selected, lv_color_hex(0x1976D2));
+    lv_style_set_shadow_opa(&style_icon_selected, LV_OPA_90);
+
+    style_inited = true;
+}
+
+// 清除选中状态(取消高亮)
+static void clear_selection(void)
+{
+    if (selected_file_icon) {
+        lv_obj_remove_style(selected_file_icon, &style_icon_selected, LV_PART_MAIN);
+        selected_file_icon = NULL;
+    }
+}
+
+// 创建一个文件图标:方块图标 + 下方文件名标签
+// index 用于初始时按从左上角顺序排布
+static lv_obj_t * create_file_icon(const char *name, int index)
+{
+    // 计算初始位置:每行 3 个,从左上角开始
+    int icon_size = 80;
+    int label_h = 20;
+    int gap_x = 30;
+    int gap_y = 30;
+    int start_x = 20;
+    int start_y = 20;
+    int col = index % 3;
+    int row = index / 3;
+    int init_x = start_x + col * (icon_size + gap_x);
+    int init_y = start_y + row * (icon_size + label_h + gap_y);
+
+    // 容器:含图标方块和文件名标签(垂直排列)
+    lv_obj_t * icon = lv_obj_create(ui_file_container);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);                  // 不可滚动
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICK_FOCUSABLE);             // 避免抢父容器焦点
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_EVENT_BUBBLE);                  // 事件冒泡(用于桌面长按)
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_PRESS_LOCK);                    // 按住期间锁定到本对象,便于跟踪拖动
+    lv_obj_set_size(icon, icon_size, icon_size + label_h);            // 包含图标方块+标签高度
+
+    // 【修改】先设置初始坐标，若存在保存的坐标则覆盖
+    lv_coord_t pos_x = init_x;
+    lv_coord_t pos_y = init_y;
+    if (get_icon_position(name, &pos_x, &pos_y)) {
+        // 已保存坐标，使用保存值
+    }
+    lv_obj_set_pos(icon, pos_x, pos_y);
+
+    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);      // 容器透明(只显示方块和文字)
+    lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(icon, 0, LV_PART_MAIN);
+    // 子元素垂直排列(方块在上,文字在下)
+    lv_obj_set_flex_flow(icon, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(icon, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(icon, 2, LV_PART_MAIN);
+
+    // 文件图标方块(用 btn 承载,看起来像一个图标)
+    lv_obj_t * btn = lv_btn_create(icon);
+    lv_obj_set_size(btn, icon_size, icon_size);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICK_FOCUSABLE);              // 不抢焦点
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_EVENT_BUBBLE);                   // 事件冒泡到父容器(图标容器)
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(btn, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(btn, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    // 用 label 显示"FILE"字样代替图标(简化版)
+    lv_obj_t * icon_label = lv_label_create(btn);
+    lv_label_set_text(icon_label, "FILE");
+    lv_obj_set_style_text_font(icon_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon_label, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_center(icon_label);
+
+    // 文件名标签(显示在图标下方)
+    lv_obj_t * name_label = lv_label_create(icon);
+    lv_label_set_text(name_label, name);
+    lv_obj_set_style_text_font(name_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(name_label, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);           // 过长省略号
+    lv_obj_set_width(name_label, icon_size);
+    lv_obj_set_style_text_align(name_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+    // 保存文件名副本到容器 user_data(事件回调用)
+    char * name_copy = (char *)lv_mem_alloc(strlen(name) + 1);
+    if (name_copy) {
+        strcpy(name_copy, name);
+        lv_obj_set_user_data(icon, name_copy);
+    }
+
+    // 注册事件:在容器上监听按下/移动/释放/单击/长按
+    lv_obj_add_event_cb(icon, file_icon_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(icon, file_icon_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(icon, file_icon_released_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(icon, file_icon_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(icon, file_icon_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
+
+    return icon;
+}
+
+// 释放图标 user_data 中保存的文件名
+static void free_icon_user_data(lv_obj_t * icon)
+{
+    if (icon == NULL) return;
+    void * data = lv_obj_get_user_data(icon);
+    if (data) {
+        lv_mem_free(data);
+        lv_obj_set_user_data(icon, NULL);
+    }
+}
+
+// 刷新桌面文件图标(从 SPIFFS 重新加载)
+static void refresh_file_icons(void)
+{
+    if (ui_file_container == NULL) return;
+
+    // 清除所有现有图标并释放其 user_data
+    uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
+    for (uint32_t i = 0; i < cnt; i++) {
+        lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
+        free_icon_user_data(child);
+    }
+    lv_obj_clean(ui_file_container);   // 清空容器
+    selected_file_icon = NULL;         // 重置选中状态
+    dragging_icon = NULL;
+    drag_in_progress = false;
+    long_press_handled = false;
+    desktop_press_moved = false;
+
+    // 【新增】加载保存的图标坐标
+    load_icon_positions();
+
+    // 从 SPIFFS 加载文件名
+    char names[USER_FILE_MAX_COUNT][USER_FILE_NAME_MAX];
+    int n = get_user_file_list(names, USER_FILE_MAX_COUNT);
+
+    for (int i = 0; i < n; i++) {
+        create_file_icon(names[i], i);
+    }
+}
+
+//【新增】桌面容器按下，记录起始坐标，重置滑动标记
+static void desktop_pressed_cb(lv_event_t * e)
+{
+    (void)e;
+    desktop_press_moved = false;
+    lv_indev_t * indev = lv_indev_get_act();
+    if(indev)
+    {
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        desktop_press_start_x = p.x;
+        desktop_press_start_y = p.y;
+    }
+}
+
+//【新增】桌面容器按住移动，检测是否发生滑动
+static void desktop_pressing_cb(lv_event_t * e)
+{
+    (void)e;
+    if(desktop_press_moved) return;
+    lv_indev_t * indev = lv_indev_get_act();
+    if(indev == NULL) return;
+
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_coord_t dx = p.x - desktop_press_start_x;
+    lv_coord_t dy = p.y - desktop_press_start_y;
+
+    // 只要移动距离超过阈值，标记已经滑动，禁止桌面长按弹出菜单
+    if( LV_ABS(dx) > DESKTOP_LONG_PRESS_MOVE_THRESHOLD || LV_ABS(dy) > DESKTOP_LONG_PRESS_MOVE_THRESHOLD )
+    {
+        desktop_press_moved = true;
+    }
+}
+
+// 桌面背景长按事件(替代鼠标右键,弹出右键菜单)
+static void desktop_long_press_cb(lv_event_t * e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_LONG_PRESSED) return;
+
+    // 仅当事件目标为容器本身时才弹出菜单
+    // 避免长按文件图标时事件冒泡上来后再次触发
+    lv_obj_t * target = lv_event_get_target(e);
+    if (target != ui_file_container) {
+        return;
+    }
+
+    // 【核心修改】如果已经发生滑动，直接返回，不弹出新建菜单
+    if(desktop_press_moved)
+    {
+        return;
+    }
+
+    // 获取触摸点坐标,菜单显示在触摸位置
+    lv_point_t point = {LVGL_PORT_H_RES / 2, LVGL_PORT_V_RES / 2};
+    lv_indev_t * indev = lv_indev_get_act();
+    if (indev) {
+        lv_indev_get_point(indev, &point);
+    }
+
+    show_context_menu(point.x, point.y, false, NULL);
+}
+
+// 文件图标按下:记录起点,重置标志
+static void file_icon_pressed_cb(lv_event_t * e)
+{
+    lv_obj_t * icon = lv_event_get_current_target(e);
+
+    // 重置状态
+    dragging_icon = icon;
+    drag_in_progress = false;
+    long_press_handled = false;
+
+    lv_indev_t * indev = lv_indev_get_act();
+    if (indev) {
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        drag_start_x = p.x;
+        drag_start_y = p.y;
+        // 记录图标当前在父容器中的坐标
+        icon_start_x = lv_obj_get_x(icon);
+        icon_start_y = lv_obj_get_y(icon);
+    }
+}
+
+// 文件图标移动中:仅在已进入拖动模式时更新位置
+static void file_icon_pressing_cb(lv_event_t * e)
+{
+    lv_obj_t * icon = lv_event_get_current_target(e);
+    if (icon != dragging_icon) return;
+    if (!drag_in_progress) return;   // 未进入拖动模式,不更新位置
+
+    lv_indev_t * indev = lv_indev_get_act();
+    if (indev == NULL) return;
+
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    // 计算与按下时的位移
+    lv_coord_t dx = p.x - drag_start_x;
+    lv_coord_t dy = p.y - drag_start_y;
+
+    // 更新图标位置(限制在容器范围内)
+    lv_coord_t new_x = icon_start_x + dx;
+    lv_coord_t new_y = icon_start_y + dy;
+    lv_coord_t max_x = lv_obj_get_width(ui_file_container) - lv_obj_get_width(icon);
+    lv_coord_t max_y = lv_obj_get_height(ui_file_container) - lv_obj_get_height(icon);
+    if (new_x < 0) new_x = 0;
+    if (new_y < 0) new_y = 0;
+    if (new_x > max_x) new_x = max_x;
+    if (new_y > max_y) new_y = max_y;
+    lv_obj_set_pos(icon, new_x, new_y);
+}
+
+// 文件图标释放:清除拖动状态(注意:拖动后不会触发 CLICKED)
+static void file_icon_released_cb(lv_event_t * e)
+{
+    (void)e;
+    // 【新增】如果发生了拖动，保存所有图标位置
+    if (drag_in_progress) {
+        save_icon_positions();
+    }
+    dragging_icon = NULL;
+    // drag_in_progress 保留到本帧 CLICKED 处理后再清空
+    // (LVGL 在 RELEASED 之后才会发 CLICKED,需在 CLICKED 回调中重置)
+}
+
+// 文件图标单击:
+// - 若长按已被处理(拖动或弹出菜单),忽略本次 CLICKED
+// - 若当前图标已选中,再次单击则打开文件(打开后取消选中)
+// - 若未选中或选中的是其他图标,则选中当前图标
+static void file_icon_clicked_cb(lv_event_t * e)
+{
+    lv_obj_t * icon = lv_event_get_current_target(e);
+
+    // 长按已处理过(拖动或弹出删除菜单),不触发单击动作
+    if (long_press_handled) {
+        long_press_handled = false;
+        drag_in_progress = false;
+        dragging_icon = NULL;
+        return;
+    }
+    dragging_icon = NULL;
+
+    if (selected_file_icon == icon) {
+        // 已经选中过本图标,再次单击 -> 打开文件
+        const char * name = (const char *)lv_obj_get_user_data(icon);
+        if (name != NULL) {
+            show_open_file_dialog(name);
+        }
+        return;
+    }
+
+    // 清除上一个选中图标的高亮
+    if (selected_file_icon) {
+        lv_obj_remove_style(selected_file_icon, &style_icon_selected, LV_PART_MAIN);
+    }
+    // 高亮当前图标
+    selected_file_icon = icon;
+    lv_obj_add_style(icon, &style_icon_selected, LV_PART_MAIN);
+}
+
+// 文件图标长按:
+// - 已选中 → 弹出删除菜单
+// - 未选中 → 进入拖动模式(图标跟随手指)
+static void file_icon_long_press_cb(lv_event_t * e)
+{
+    lv_obj_t * icon = lv_event_get_current_target(e);
+
+    // 标记长按已被处理,阻止后续 CLICKED 误触发
+    long_press_handled = true;
+
+    if (selected_file_icon == icon) {
+        // 已选中:弹出删除菜单
+        const char * name = (const char *)lv_obj_get_user_data(icon);
+        if (name == NULL) return;
+
+        // 获取触摸点坐标,菜单显示在触摸位置
+        lv_point_t point = {LVGL_PORT_H_RES / 2, LVGL_PORT_V_RES / 2};
+        lv_indev_t * indev = lv_indev_get_act();
+        if (indev) {
+            lv_indev_get_point(indev, &point);
+        }
+        show_context_menu(point.x, point.y, true, name);
+    } else {
+        // 未选中:进入拖动模式,后续 pressing_cb 会更新图标位置
+        drag_in_progress = true;
+    }
+}
+
+// ---------------- 右键菜单(上下文菜单) ----------------
+
+// 关闭右键菜单
+static void close_context_menu(void)
+{
+    if (context_menu) {
+        lv_obj_del(context_menu);
+        context_menu = NULL;
+    }
+    if (context_menu_bg) {
+        lv_obj_del(context_menu_bg);
+        context_menu_bg = NULL;
+    }
+    context_menu_file_name[0] = '\0';
+}
+
+// 点击菜单外区域关闭菜单
+static void context_menu_bg_click_cb(lv_event_t * e)
+{
+    (void)e;
+    close_context_menu();
+}
+
+// 菜单项"新建"回调:关闭菜单后弹出新建文件对话框
+static void menu_item_new_cb(lv_event_t * e)
+{
+    (void)e;
+    close_context_menu();
+    show_new_file_dialog();
+}
+
+// 菜单项"删除"回调:关闭菜单后弹出删除确认框
+static void menu_item_delete_cb(lv_event_t * e)
+{
+    (void)e;
+    // 先把文件名复制出来(关闭菜单会清空 context_menu_file_name)
+    char name_copy[USER_FILE_NAME_MAX];
+    strncpy(name_copy, context_menu_file_name, USER_FILE_NAME_MAX - 1);
+    name_copy[USER_FILE_NAME_MAX - 1] = '\0';
+    close_context_menu();
+    show_delete_confirm(name_copy);
+}
+
+// 显示右键菜单
+// x, y: 菜单显示位置(触摸点坐标)
+// is_file: true=文件菜单(显示"删除"), false=桌面菜单(显示"新建")
+// file_name: 文件名(is_file=true 时有效)
+static void show_context_menu(int x, int y, bool is_file, const char *file_name)
+{
+    // 先关闭已有的菜单
+    close_context_menu();
+
+    // 保存关联的文件名
+    if (is_file && file_name) {
+        strncpy(context_menu_file_name, file_name, USER_FILE_NAME_MAX - 1);
+        context_menu_file_name[USER_FILE_NAME_MAX - 1] = '\0';
+    } else {
+        context_menu_file_name[0] = '\0';
+    }
+
+    // 创建全屏透明背景,点击它可关闭菜单
+    context_menu_bg = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(context_menu_bg, LVGL_PORT_H_RES, LVGL_PORT_V_RES);
+    lv_obj_set_pos(context_menu_bg, 0, 0);
+    lv_obj_set_style_bg_opa(context_menu_bg, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(context_menu_bg, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(context_menu_bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(context_menu_bg, context_menu_bg_click_cb, LV_EVENT_CLICKED, NULL);
+
+    // 创建菜单面板
+    context_menu = lv_obj_create(lv_layer_top());
+    lv_obj_clear_flag(context_menu, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(context_menu, 120, 50);
+    lv_obj_set_style_bg_color(context_menu, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(context_menu, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(context_menu, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_border_width(context_menu, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(context_menu, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(context_menu, 5, LV_PART_MAIN);
+
+    // 菜单位置(触摸点),超出屏幕则调整
+    int menu_x = x;
+    int menu_y = y;
+    if (menu_x + 120 > LVGL_PORT_H_RES) menu_x = LVGL_PORT_H_RES - 120;
+    if (menu_y + 50 > LVGL_PORT_V_RES) menu_y = LVGL_PORT_V_RES - 50;
+    if (menu_x < 0) menu_x = 0;
+    if (menu_y < 0) menu_y = 0;
+    lv_obj_set_pos(context_menu, menu_x, menu_y);
+
+    // 创建菜单项按钮
+    lv_obj_t * btn = lv_btn_create(context_menu);
+    lv_obj_set_size(btn, 110, 38);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * label = lv_label_create(btn);
+    if (is_file) {
+        lv_label_set_text(label, "删除");
+    } else {
+        lv_label_set_text(label, "新建");
+    }
+    lv_obj_set_style_text_font(label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(label);
+
+    if (is_file) {
+        lv_obj_add_event_cb(btn, menu_item_delete_cb, LV_EVENT_CLICKED, NULL);
+    } else {
+        lv_obj_add_event_cb(btn, menu_item_new_cb, LV_EVENT_CLICKED, NULL);
+    }
+}
+
+// ---------------- 新建文件对话框 ----------------
+
+// 新建文件"确定"按钮回调
+static void newfile_confirm_cb(lv_event_t * e)
+{
+    (void)e;
+    const char * name = lv_textarea_get_text(newfile_ta);
+
+    // 校验:名字非空
+    if (name == NULL || name[0] == '\0') {
+        show_message_box("提示", "请输入文件名!");
+        return;
+    }
+    // 校验:长度限制
+    if (strlen(name) >= USER_FILE_NAME_MAX) {
+        show_message_box("提示", "文件名过长!");
+        return;
+    }
+    // 校验:不能包含逗号(避免与账号文件格式冲突)和斜杠
+    for (const char *p = name; *p; p++) {
+        if (*p == ',' || *p == '/' || *p == '\\') {
+            show_message_box("提示", "文件名含非法字符!");
+            return;
+        }
+    }
+
+    // 创建文件(内部会做重名检查)
+    esp_err_t ret = create_user_file(name);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        show_message_box("提示", "同名文件已存在!");
+        return;
+    } else if (ret != ESP_OK) {
+        show_message_box("错误", "创建文件失败!");
+        return;
+    }
+
+    // 关闭对话框
+    if (newfile_panel) {
+        lv_obj_del(newfile_panel);
+        newfile_panel = NULL;
+        newfile_ta = NULL;
+    }
+    // 隐藏键盘
+    if (ui_desktop_kb) {
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 刷新桌面
+    refresh_file_icons();
+    show_message_box("成功", "文件已创建!");
+}
+
+// 新建文件"取消"按钮回调
+static void newfile_cancel_cb(lv_event_t * e)
+{
+    (void)e;
+    if (newfile_panel) {
+        lv_obj_del(newfile_panel);
+        newfile_panel = NULL;
+        newfile_ta = NULL;
+    }
+    if (ui_desktop_kb) {
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 输入框被点击时弹出键盘
+static void newfile_ta_clicked_cb(lv_event_t * e)
+{
+    (void)e;
+    if (ui_desktop_kb) {
+        lv_obj_clear_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_desktop_kb, newfile_ta);
+    }
+}
+
+// 显示新建文件对话框
+static void show_new_file_dialog(void)
+{
+    if (newfile_panel) {
+        // 已存在,直接返回避免重复创建
+        return;
+    }
+
+    init_icon_style();
+
+    // 创建半透明遮罩面板
+    newfile_panel = lv_obj_create(ui_Screen3);
+    lv_obj_set_size(newfile_panel, 300, 180);
+    lv_obj_center(newfile_panel);
+    lv_obj_clear_flag(newfile_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(newfile_panel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(newfile_panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(newfile_panel, lv_color_hex(0x337ab7), LV_PART_MAIN);
+    lv_obj_set_style_border_width(newfile_panel, 2, LV_PART_MAIN);
+
+    // 标题
+    lv_obj_t * title = lv_label_create(newfile_panel);
+    lv_label_set_text(title, "新建文件");
+    lv_obj_set_style_text_font(title, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
+
+    // 文件名输入框
+    newfile_ta = lv_textarea_create(newfile_panel);
+    lv_obj_set_size(newfile_ta, 200, 40);
+    lv_obj_align(newfile_ta, LV_ALIGN_TOP_MID, 0, 40);
+    lv_textarea_set_placeholder_text(newfile_ta, "输入文件名");
+    lv_textarea_set_one_line(newfile_ta, true);
+    lv_obj_set_style_text_font(newfile_ta, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_add_event_cb(newfile_ta, newfile_ta_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    // 确定按钮
+    lv_obj_t * btn_ok = lv_btn_create(newfile_panel);
+    lv_obj_set_size(btn_ok, 70, 35);
+    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    lv_obj_clear_flag(btn_ok, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, "确定");
+    lv_obj_set_style_text_font(lbl_ok, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_ok);
+    lv_obj_add_event_cb(btn_ok, newfile_confirm_cb, LV_EVENT_CLICKED, NULL);
+
+    // 取消按钮
+    lv_obj_t * btn_cancel = lv_btn_create(newfile_panel);
+    lv_obj_set_size(btn_cancel, 70, 35);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "取消");
+    lv_obj_set_style_text_font(lbl_cancel, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, newfile_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    // 显示键盘并绑定输入框
+    if (ui_desktop_kb) {
+        lv_obj_clear_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_desktop_kb, newfile_ta);
+    }
+}
+
+// ---------------- 打开文件对话框(可编辑) ----------------
+
+// 文件内容编辑框被修改时的回调
+static void openfile_ta_changed_cb(lv_event_t * e)
+{
+    (void)e;
+    // 标记为已修改(未保存)
+    openfile_dirty = true;
+}
+
+// 编辑框被点击时弹出键盘
+static void openfile_ta_clicked_cb(lv_event_t * e)
+{
+    (void)e;
+    if (ui_desktop_kb) {
+        lv_obj_clear_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_desktop_kb, openfile_ta);
+    }
+}
+// 键盘 READY隐藏
+static void desktop_kb_ready_cb(lv_event_t * e)
 {
     lv_event_code_t event_code = lv_event_get_code(e);
-
-    if(event_code == LV_EVENT_CLICKED) {
-        char account[MAX_ACCOUNT_LENGTH] = {0};
-        char password[MAX_PASSWORD_LENGTH] = {0};
-        if(read_text_from_nvs(account, MAX_ACCOUNT_LENGTH, "acc") == ESP_OK)
+    if(event_code == LV_EVENT_READY)
+    {
+        //按下回车/完成，隐藏键盘
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        //获取当前绑定的输入框，清除焦点，防止再次自动弹起键盘
+        lv_obj_t * ta = lv_keyboard_get_textarea(ui_desktop_kb);
+        if(ta != NULL)
         {
-            if(read_text_from_nvs(password, MAX_PASSWORD_LENGTH, "pwd") == ESP_OK)
-            {
-                lv_textarea_set_text(ui_zhanghao, account);
-                lv_textarea_set_text(ui_mima, password);
-                lv_obj_add_state(ui_jizhu, LV_STATE_CHECKED); 
-            }
+            lv_obj_clear_state(ta, LV_STATE_FOCUSED);
         }
-        _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen1_screen_init);
     }
+}
+
+// 写文件内容到 SPIFFS(内部使用)
+static esp_err_t write_user_file(const char *name, const char *content)
+{
+    if (name == NULL || content == NULL) return ESP_ERR_INVALID_ARG;
+
+    char path[64] = {0};
+    get_user_file_path(name, path, sizeof(path));
+
+    FILE *file = fopen(path, "w");
+    if (file == NULL) {
+        ESP_LOGE("SPIFFS", "写入文件失败: %s", path);
+        return ESP_FAIL;
+    }
+    fputs(content, file);
+    fclose(file);
+    return ESP_OK;
+}
+
+// "保存"按钮回调:把当前内容写入文件并更新原始内容快照
+static void openfile_save_cb(lv_event_t * e)
+{
+    (void)e;
+    if (openfile_ta == NULL) return;
+
+    const char * content = lv_textarea_get_text(openfile_ta);
+    esp_err_t ret = write_user_file(openfile_name, content ? content : "");
+    if (ret == ESP_OK) {
+        // 同步原始内容快照,清空 dirty 标志
+        strncpy(openfile_original_content, content ? content : "", sizeof(openfile_original_content) - 1);
+        openfile_original_content[sizeof(openfile_original_content) - 1] = '\0';
+        openfile_dirty = false;
+        show_message_box("成功", "已保存!");
+    } else {
+        show_message_box("错误", "保存失败!");
+    }
+}
+
+// 真正执行关闭(无提示)
+static void openfile_do_close(void)
+{
+    if (openfile_panel) {
+        lv_obj_del(openfile_panel);
+        openfile_panel = NULL;
+        openfile_ta = NULL;
+    }
+    openfile_name[0] = '\0';
+    openfile_original_content[0] = '\0';
+    openfile_dirty = false;
+    if (ui_desktop_kb) {
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 未保存确认消息框按钮回调
+static void unsaved_msgbox_cb(lv_event_t * e)
+{
+    lv_obj_t * btnm = lv_event_get_target(e);
+    lv_obj_t * mbox = lv_obj_get_parent(btnm);
+    const char * btn_text = lv_msgbox_get_active_btn_text(mbox);
+
+    if (btn_text && strcmp(btn_text, "不保存") == 0) {
+        // 用户确认放弃修改,直接关闭
+        lv_msgbox_close(mbox);
+        openfile_do_close();
+    } else {
+        // 取消:用户回去继续编辑
+        lv_msgbox_close(mbox);
+    }
+}
+
+// 打开文件"关闭"按钮回调:若有未保存修改则弹提示
+static void openfile_close_cb(lv_event_t * e)
+{
+    (void)e;
+    if (openfile_dirty) {
+        // 有未保存的修改,弹出确认框
+        static const char * btns[] = {"不保存", "取消", ""};
+        lv_obj_t * mbox = lv_msgbox_create(NULL, "提示", "文件未保存,是否放弃修改?", btns, true);
+        lv_obj_set_style_text_font(mbox, &ui_font_Font1, LV_PART_MAIN);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, unsaved_msgbox_cb, LV_EVENT_CLICKED, NULL);
+        return;
+    }
+    openfile_do_close();
+}
+
+// 显示打开文件对话框(可编辑)
+static void show_open_file_dialog(const char *name)
+{
+    if (openfile_panel) {
+        // 已有打开窗口,先关闭
+        lv_obj_del(openfile_panel);
+        openfile_panel = NULL;
+        openfile_ta = NULL;
+    }
+
+    // 读取文件内容
+    int n = read_user_file(name, openfile_original_content, sizeof(openfile_original_content));
+    if (n < 0) {
+        show_message_box("错误", "读取文件失败!");
+        return;
+    }
+    // 保存当前打开的文件名
+    strncpy(openfile_name, name, USER_FILE_NAME_MAX - 1);
+    openfile_name[USER_FILE_NAME_MAX - 1] = '\0';
+    openfile_dirty = false;
+
+    // 打开文件后清除图标选中状态(下次单击图标会重新选中,而不是直接打开)
+    clear_selection();
+
+    // 创建面板
+    openfile_panel = lv_obj_create(ui_Screen3);
+    lv_obj_set_size(openfile_panel, 500, 360);
+    lv_obj_center(openfile_panel);
+    lv_obj_clear_flag(openfile_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(openfile_panel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(openfile_panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(openfile_panel, lv_color_hex(0x337ab7), LV_PART_MAIN);
+    lv_obj_set_style_border_width(openfile_panel, 2, LV_PART_MAIN);
+
+    // 标题(显示文件名)
+    lv_obj_t * title = lv_label_create(openfile_panel);
+    lv_label_set_text(title, name);
+    lv_obj_set_style_text_font(title, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
+
+    // 内容编辑框(textarea 可编辑)
+    openfile_ta = lv_textarea_create(openfile_panel);
+    lv_obj_set_size(openfile_ta, 460, 240);
+    lv_obj_align(openfile_ta, LV_ALIGN_TOP_MID, 0, 35);
+    lv_textarea_set_text(openfile_ta, openfile_original_content);
+    lv_obj_set_style_text_font(openfile_ta, &ui_font_Font1, LV_PART_MAIN);
+    // 监听内容变化
+    lv_obj_add_event_cb(openfile_ta, openfile_ta_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    // 点击编辑框时弹出键盘
+    lv_obj_add_event_cb(openfile_ta, openfile_ta_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    // 保存按钮
+    lv_obj_t * btn_save = lv_btn_create(openfile_panel);
+    lv_obj_set_size(btn_save, 80, 35);
+    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_LEFT, 20, 0);
+    lv_obj_clear_flag(btn_save, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_save = lv_label_create(btn_save);
+    lv_label_set_text(lbl_save, "保存");
+    lv_obj_set_style_text_font(lbl_save, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_save);
+    lv_obj_add_event_cb(btn_save, openfile_save_cb, LV_EVENT_CLICKED, NULL);
+
+    // 关闭按钮
+    lv_obj_t * btn_close = lv_btn_create(openfile_panel);
+    lv_obj_set_size(btn_close, 80, 35);
+    lv_obj_align(btn_close, LV_ALIGN_BOTTOM_RIGHT, -20, 0);
+    lv_obj_clear_flag(btn_close, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_close = lv_label_create(btn_close);
+    lv_label_set_text(lbl_close, "关闭");
+    lv_obj_set_style_text_font(lbl_close, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_close);
+    lv_obj_add_event_cb(btn_close, openfile_close_cb, LV_EVENT_CLICKED, NULL);
+}
+
+// ---------------- 删除确认对话框 ----------------
+
+// 删除确认消息框按钮回调
+static void delete_msgbox_cb(lv_event_t * e)
+{
+    lv_obj_t * btnm = lv_event_get_target(e);
+    lv_obj_t * mbox = lv_obj_get_parent(btnm);
+    const char * btn_text = lv_msgbox_get_active_btn_text(mbox);
+
+    if (btn_text && strcmp(btn_text, "删除") == 0) {
+        // 执行删除
+        esp_err_t ret = delete_user_file(delete_target_name);
+        delete_target_name[0] = '\0';
+
+        // 关闭消息框
+        lv_msgbox_close(mbox);
+        delete_msgbox = NULL;
+
+        if (ret == ESP_OK) {
+            refresh_file_icons();
+            show_message_box("成功", "文件已删除!");
+        } else {
+            show_message_box("错误", "删除文件失败!");
+        }
+    } else {
+        // 取消
+        lv_msgbox_close(mbox);
+        delete_msgbox = NULL;
+        delete_target_name[0] = '\0';
+    }
+}
+
+// 显示删除确认对话框
+static void show_delete_confirm(const char *name)
+{
+    if (delete_msgbox) {
+        // 已有对话框,先关闭
+        lv_msgbox_close(delete_msgbox);
+        delete_msgbox = NULL;
+    }
+
+    // 保存待删除的文件名
+    strncpy(delete_target_name, name, USER_FILE_NAME_MAX - 1);
+    delete_target_name[USER_FILE_NAME_MAX - 1] = '\0';
+
+    // 创建带"删除"和"取消"按钮的消息框
+    static const char * btns[] = {"删除", "取消", ""};
+    char msg[80] = {0};
+    snprintf(msg, sizeof(msg), "确定删除文件: %s ?", name);
+    delete_msgbox = lv_msgbox_create(NULL, "删除文件", msg, btns, true);
+    lv_obj_set_style_text_font(delete_msgbox, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(delete_msgbox);
+    lv_obj_add_event_cb(delete_msgbox, delete_msgbox_cb, LV_EVENT_CLICKED, NULL);
 }
 
 // build funtions
@@ -38,17 +1024,18 @@ void ui_Screen3_screen_init(void)
     ui_Screen3 = lv_obj_create(NULL);
     lv_obj_clear_flag(ui_Screen3, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_bg_img_src(ui_Screen3, &ui_img_1984903667, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_Screen3, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_exitbtu1 = lv_btn_create(ui_Screen3);
-    lv_obj_set_width(ui_exitbtu1, 80);
-    lv_obj_set_height(ui_exitbtu1, 40);
-    lv_obj_set_x(ui_exitbtu1, 350);
-    lv_obj_set_y(ui_exitbtu1, -200);
-    lv_obj_set_align(ui_exitbtu1, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
-    lv_obj_clear_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    lv_obj_set_style_bg_color(ui_exitbtu1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_exitbtu1, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    // ui_exitbtu1 = lv_btn_create(ui_Screen3);
+    // lv_obj_set_width(ui_exitbtu1, 80);
+    // lv_obj_set_height(ui_exitbtu1, 40);
+    // lv_obj_set_x(ui_exitbtu1, 350);
+    // lv_obj_set_y(ui_exitbtu1, -200);
+    // lv_obj_set_align(ui_exitbtu1, LV_ALIGN_CENTER);
+    // lv_obj_add_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    // lv_obj_clear_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    // lv_obj_set_style_bg_color(ui_exitbtu1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    // lv_obj_set_style_bg_opa(ui_exitbtu1, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_Label4 = lv_label_create(ui_exitbtu1);
     lv_obj_set_width(ui_Label4, LV_SIZE_CONTENT);   /// 1
@@ -59,17 +1046,78 @@ void ui_Screen3_screen_init(void)
     lv_obj_set_style_text_opa(ui_Label4, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_Label4, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
+    // lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
 
+    // 初始化图标样式
+    init_icon_style();
+
+    // 创建文件图标容器(覆盖整个屏幕,不可滚动)
+    // 不可滚动 + PRESS_LOCK 保证"原地长按"才能触发,滑动时不会触发长按
+    ui_file_container = lv_obj_create(ui_Screen3);
+    lv_obj_set_size(ui_file_container, LVGL_PORT_H_RES, LVGL_PORT_V_RES);
+    lv_obj_set_pos(ui_file_container, 0, 0);
+    lv_obj_clear_flag(ui_file_container, LV_OBJ_FLAG_SCROLLABLE);   // 关键:不可滚动以支持原地长按
+    lv_obj_add_flag(ui_file_container, LV_OBJ_FLAG_EVENT_BUBBLE);    // 事件冒泡到屏幕
+    lv_obj_set_style_bg_opa(ui_file_container, LV_OPA_TRANSP, LV_PART_MAIN);   // 透明背景
+    lv_obj_set_style_border_width(ui_file_container, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ui_file_container, 0, LV_PART_MAIN);
+
+    //【新增】注册桌面按下、移动回调，用于检测滑动
+    lv_obj_add_event_cb(ui_file_container, desktop_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ui_file_container, desktop_pressing_cb, LV_EVENT_PRESSING, NULL);
+    // 在容器上注册长按事件(用作"鼠标右键"弹出右键菜单)
+    lv_obj_add_event_cb(ui_file_container, desktop_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
+
+    // 创建桌面键盘(初始隐藏)
+    ui_desktop_kb = lv_keyboard_create(lv_layer_top());
+    lv_obj_set_width(ui_desktop_kb, 800);
+    lv_obj_set_height(ui_desktop_kb, 120);
+    lv_obj_align(ui_desktop_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+
+    // 新增：设置文本模式，显示READY(回车完成)按键
+    lv_keyboard_set_mode(ui_desktop_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    // 新增：绑定READY回车回调
+    lv_obj_add_event_cb(ui_desktop_kb, desktop_kb_ready_cb, LV_EVENT_ALL, NULL);
+
+    // 从 SPIFFS 加载并渲染文件图标
+    refresh_file_icons();
 }
 
 void ui_Screen3_screen_destroy(void)
 {
+    // 释放所有图标的 user_data
+    if (ui_file_container) {
+        uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
+        for (uint32_t i = 0; i < cnt; i++) {
+            lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
+            free_icon_user_data(child);
+        }
+    }
+
     if(ui_Screen3) lv_obj_del(ui_Screen3);
 
     // NULL screen variables
     ui_Screen3 = NULL;
     ui_exitbtu1 = NULL;
     ui_Label4 = NULL;
-
+    ui_file_container = NULL;
+    ui_desktop_kb = NULL;
+    selected_file_icon = NULL;
+    newfile_panel = NULL;
+    newfile_ta = NULL;
+    openfile_panel = NULL;
+    openfile_ta = NULL;
+    openfile_name[0] = '\0';
+    openfile_original_content[0] = '\0';
+    openfile_dirty = false;
+    delete_msgbox = NULL;
+    delete_target_name[0] = '\0';
+    context_menu = NULL;
+    context_menu_bg = NULL;
+    context_menu_file_name[0] = '\0';
+    dragging_icon = NULL;
+    drag_in_progress = false;
+    long_press_handled = false;
+    desktop_press_moved = false;
 }
