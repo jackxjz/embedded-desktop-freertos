@@ -1,82 +1,87 @@
-# embedded-desktop-freertos
-ESP32 上的 FreeRTOS 桌面操作系统模拟器
+# 基于 ESP32 的简易 FreeRTOS 操作系统
 
-| Supported Targets | ESP32-S3 |
-| ----------------- | -------- |
+中文 | [English](README.en.md)
 
-| Supported LCD Controller    | ST7701 |
-| ----------------------------| -------|
+本项目为 ESP32 上的 FreeRTOS 桌面操作系统模拟器，用于完成 2026 电子科技协会嵌入式组考核
 
-| Supported Touch Controller  |  GT911 |
-| ----------------------------| -------|
 
-# RGB Avoid Tearing Example
+## 硬件清单
 
-[esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) provides several panel drivers out-of box, e.g. ST7789, SSD1306, NT35510. However, there're a lot of other panels on the market, it's beyond `esp_lcd` component's responsibility to include them all.
+### 主控开发板
 
-`esp_lcd` allows user to add their own panel drivers in the project scope (i.e. panel driver can live outside of esp-idf), so that the upper layer code like LVGL porting code can be reused without any modifications, as long as user-implemented panel driver follows the interface defined in the `esp_lcd` component.
+![ESP32-S3-Touch-LCD-7 板载资源](https://docs.waveshare.net/assets/images/ESP32-S3-Touch-LCD-7-Intro1-1354f76103c5429920a42f7a5ca1dc7d.webp)
 
-This example demonstrates how to avoid tearing when using LVGL with RGB interface screens in an esp-idf project. The example will use the LVGL library to draw a stylish music player.
+| 项目    | 规格                                                   |
+|-------|------------------------------------------------------|
+| 型号    | ESP32-S3-Touch-LCD-7                                 |
+| 厂商    | 微雪 (Waveshare)                                       |
+| 处理器   | 高性能 Xtensa 32 位 LX7 双核处理器，主频高达 240 MHz               |
+| 无线连接  | 支持 2.4 GHz Wi-Fi（802.11 b/g/n）和 Bluetooth 5（LE），板载天线 |
+| Flash | 8 MB                                                 |
+| PSRAM | 8 MB                                                 |
+| 显示屏   | 7 英寸电容触摸屏                                            |
+| 外设接口  | CAN、RS485、I²C、USB 等                                  |
+| 开发方式  | ESP-IDF                                              |
 
-This example uses the [esp_timer](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/esp_timer.html) to generate the ticks needed by LVGL and uses a dedicated task to run the `lv_timer_handler()`. Since the LVGL APIs are not thread-safe, this example uses a mutex which be invoked before the call of `lv_timer_handler()` and released after it. The same mutex needs to be used in other tasks and threads around every LVGL (lv_...) related function call and code. For more porting guides, please refer to [LVGL porting doc](https://docs.lvgl.io/master/porting/index.html).
+[原理图](https://files.waveshare.net/wiki/ESP32-S3-Touch-LCD-7/ESP32-S3-Touch-LCD-7-Sch.pdf) | [ESP32-S3-Touch-LCD-7 图纸](https://www.waveshare.net/wiki/%E6%96%87%E4%BB%B6:ESP32-S3-Touch-LCD-7.zip)
 
-## How to use the example
+### 其他外设
 
-## ESP-IDF Required
+> 待补充
 
-### Hardware Required
+## 开发日志
 
-* An ESP32-S3R8 development board
-* A ST7701 LCD panel, with RGB interface
-* An USB cable for power supply and programming
+所有软件变更将记录于此
 
-### Hardware Connection
+### 2.1
 
-The connection between ESP Board and the LCD is as follows:
+#### 新增
+- 新增鼠标光标并跟踪触摸位置移动
+- 新增未保存文件提示，若尝试关闭未保存的文件将弹出确认窗口
 
-```
-       ESP Board                           RGB  Panel
-+-----------------------+              +-------------------+
-|                   GND +--------------+GND                |
-|                       |              |                   |
-|                   3V3 +--------------+VCC                |
-|                       |              |                   |
-|                   PCLK+--------------+PCLK               |
-|                       |              |                   |
-|             DATA[15:0]+--------------+DATA[15:0]         |
-|                       |              |                   |
-|                  HSYNC+--------------+HSYNC              |
-|                       |              |                   |
-|                  VSYNC+--------------+VSYNC              |
-|                       |              |                   |
-|                     DE+--------------+DE                 |
-|                       |              |                   |
-|               BK_LIGHT+--------------+BLK                |
-+-----------------------+              |                   |
-                               3V3-----+DISP_EN            |
-                                       |                   |
-                                       +-------------------+
-```
+#### 改进
+- 实现文件唯一性校验机制，禁止创建同名文件
 
-* The LCD parameters and GPIO number used by this example can be changed in [example_rgb_avoid_tearing.c](main/example_rgb_avoid_tearing.c). Especially, please pay attention to the **vendor specific initialization**, it can be different between manufacturers and should consult the LCD supplier for initialization sequence code.
-* The LVGL parameters can be changed not only through `menuconfig` but also directly in `lvgl_conf.h`
+### 2.0
 
-### Configure the Project
+#### 新增
+- 全新桌面主界面，支持应用图标渲染
+- 基于 SPIFFS 文件系统实现文件管理功能：新建文件与删除文件
+- 桌面支持文件选中和打开，文件编辑器页面支持退出并返回桌面
 
-Run `idf.py menuconfig` and navigate to `Example Configuration` menu.
+### 1.3
 
-### Build and Flash
+#### 新增
+- 新增密码错误提示：错误次数累计到 3 次后锁定 10 秒
 
-Run `idf.py set-target esp32s3` to select the target chip.
+### 1.2
 
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A fancy animation will show up on the LCD as expected.
+#### 新增
+- 新增用户账户管理页面
+- 实现账户列表页面，支持查看和删除已注册的本地账户
+- 支持账户级操作：删除账户
 
-The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from registry into `managed_components` folder.
+#### 改进
+- 优化用户名/密码错误提示：确保用户名/密码错误或密码为空时都有弹窗提示
+- 增强登录页面输入框焦点管理与软键盘适配
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+### 1.1
 
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
+#### 新增
+- 登录流程新增用户条款确认选项
+- 登录表单新增"记住密码"功能，凭证加密存储至 NVS
+- 集成 SPIFFS 轻量级文件系统，支持账户数据持久化存储
 
-## Troubleshooting
+#### 改进
+- 优化注册流程：新增用户名唯一性校验，冲突时实时提示并阻止重复注册
 
-For any technical queries, please open an [issue](https://github.com/espressif/esp-iot-solution/issues) on GitHub. We will get back to you soon.
+### 1.0
+
+#### 新增
+- 项目初始版本发布，基于 ESP32-S3 + FreeRTOS + LVGL 构建
+- 实现系统登录、注册页面架构
+- 基础密码验证引擎，支持本地账户注册与登录鉴权
+- 实现 BSP 层抽象：LCD 显示驱动、触摸控制器、背光控制
+
+## 故障排除
+
