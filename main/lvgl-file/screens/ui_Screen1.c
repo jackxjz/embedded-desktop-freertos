@@ -23,6 +23,95 @@ lv_obj_t * ui_managebtu1 = NULL;
 lv_obj_t * ui_Label8 = NULL;
 bool is_remeber = false;
 
+// 登录失败锁定相关变量
+#define MAX_FAIL_COUNT 3                  // 触发锁定的最大连续失败次数
+#define LOCK_DURATION_SECONDS 10          // 锁定时长(秒)
+static int login_fail_count = 0;          // 连续登录失败次数计数
+static bool is_locked = false;            // 是否处于锁定状态
+static int lock_remaining_seconds = 0;    // 锁定剩余秒数
+static lv_timer_t * lock_timer = NULL;    // 锁定倒计时定时器
+static lv_obj_t * lock_msgbox = NULL;     // 锁定提示消息框引用
+
+// 锁定倒计时定时器回调(每秒触发一次)
+static void lock_timer_cb(lv_timer_t * timer)
+{
+    (void)timer;                          // 避免未使用参数警告
+    lock_remaining_seconds--;             // 剩余秒数递减
+
+    if (lock_remaining_seconds > 0) {
+        // 仍在锁定中：先销毁旧弹窗，再新建带最新倒计时的弹窗
+        if(lock_msgbox != NULL)
+        {
+            lv_msgbox_close(lock_msgbox);
+            lock_msgbox = NULL;
+        }
+        char msg[64] = {0};
+        snprintf(msg, sizeof(msg), "错误次数过多,已锁定!\n请等待 %d 秒...", lock_remaining_seconds);
+        lock_msgbox = lv_msgbox_create(NULL, "锁定提示", msg, NULL, false);
+        lv_obj_set_style_text_font(lock_msgbox, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_center(lock_msgbox);
+    } else {
+        // 倒计时结束,执行解锁
+        is_locked = false;                // 清除锁定标志
+        login_fail_count = 0;             // 失败计数清零
+
+        // 关闭锁定提示消息框
+        if (lock_msgbox != NULL) {
+            lv_msgbox_close(lock_msgbox);
+            lock_msgbox = NULL;
+        }
+        // 删除定时器
+        if (lock_timer != NULL) {
+            lv_timer_del(lock_timer);
+            lock_timer = NULL;
+        }
+        // 恢复账号、密码输入框可用
+        lv_obj_clear_state(ui_zhanghao, LV_STATE_DISABLED);
+        lv_obj_clear_state(ui_mima, LV_STATE_DISABLED);
+        // 恢复注册、管理按钮可用
+        lv_obj_clear_state(ui_registerbtu1, LV_STATE_DISABLED);
+        lv_obj_clear_state(ui_managebtu1, LV_STATE_DISABLED);
+        // 登录按钮是否可用取决于"同意协议"复选框状态
+        if (lv_obj_has_state(ui_tongyi, LV_STATE_CHECKED)) {
+            lv_obj_clear_state(ui_loginbtu1, LV_STATE_DISABLED);
+        }
+        // 提示用户已解锁
+        show_message_box("提示", "已解锁,请重新输入!");
+    }
+}
+
+// 触发登录界面锁定
+static void lock_login_screen(void)
+{
+    if(is_locked)
+    {
+        return;
+    }
+
+    is_locked = true;                     // 设置锁定标志
+    lock_remaining_seconds = LOCK_DURATION_SECONDS;  // 初始化倒计时
+
+    // 禁用账号、密码输入框
+    lv_obj_add_state(ui_zhanghao, LV_STATE_DISABLED);
+    lv_obj_add_state(ui_mima, LV_STATE_DISABLED);
+    // 禁用登录、注册、管理按钮
+    lv_obj_add_state(ui_loginbtu1, LV_STATE_DISABLED);
+    lv_obj_add_state(ui_registerbtu1, LV_STATE_DISABLED);
+    lv_obj_add_state(ui_managebtu1, LV_STATE_DISABLED);
+    // 隐藏键盘,避免继续输入
+    _ui_flag_modify(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN, _UI_MODIFY_FLAG_ADD);
+
+    // 创建无按钮的锁定提示消息框
+    char msg[64] = {0};
+    snprintf(msg, sizeof(msg), "错误次数过多,已锁定!\n请等待 %d 秒...", lock_remaining_seconds);
+    lock_msgbox = lv_msgbox_create(NULL, "锁定提示", msg, NULL, false);
+    lv_obj_set_style_text_font(lock_msgbox, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(lock_msgbox);
+
+    // 创建每秒触发一次的倒计时定时器
+    lock_timer = lv_timer_create(lock_timer_cb, 1000, NULL);
+}
+
 // event funtions
 void ui_event_zhanghao(lv_event_t * e)
 {
@@ -49,16 +138,30 @@ void ui_event_loginbtu1(lv_event_t * e)
     lv_event_code_t event_code = lv_event_get_code(e);
 
     if(event_code == LV_EVENT_CLICKED) {
+        // 锁定状态下忽略登录请求
+        if (is_locked) {
+            return;
+        }
+
         // 获取账号和密码
         const char *account = lv_textarea_get_text(ui_zhanghao);
         const char *password = lv_textarea_get_text(ui_mima);
 
         // 检查账号和密码是否匹配
         if (!check_account(account, password)) {
-            // 处理保存失败的情况,显示一个错误消息框
-            show_message_box("错误","账号或密码错误,请重试!");
+            login_fail_count++;      // 累加连续失败次数
+
+            if (login_fail_count >= MAX_FAIL_COUNT) {
+                // 达到最大失败次数,触发锁定
+                lock_login_screen();
+            } else {
+                // 处理保存失败的情况,显示一个错误消息框
+                show_message_box("错误","账号或密码错误,请重试!");
+            }
         }
         else{
+            login_fail_count = 0;    // 登录成功,重置失败计数
+
             // 验证成功：根据should_remember_password决定是否保存
             if(is_remeber)
             {
@@ -280,6 +383,16 @@ void ui_Screen1_screen_init(void)
 void ui_Screen1_screen_destroy(void)
 {
     if(ui_Screen1) lv_obj_del(ui_Screen1);
+
+    // 清理登录锁定相关资源,避免悬空指针
+    if (lock_timer != NULL) {
+        lv_timer_del(lock_timer);
+        lock_timer = NULL;
+    }
+    lock_msgbox = NULL;             // 消息框随屏幕一起销毁
+    is_locked = false;
+    login_fail_count = 0;
+    lock_remaining_seconds = 0;
 
     // NULL screen variables
     ui_Screen1 = NULL;
