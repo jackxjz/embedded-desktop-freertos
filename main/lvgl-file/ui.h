@@ -22,6 +22,7 @@ extern "C" {
 #include "screens/ui_Screen2.h"
 #include "screens/ui_Screen3.h"
 #include "screens/ui_Screen4.h"
+#include "screens/ui_Screen5.h"
 
 ///////////////////// VARIABLES ////////////////////
 
@@ -29,6 +30,9 @@ extern "C" {
 // EVENTS
 
 extern lv_obj_t * ui____initial_actions0;
+
+// 光标对象外部声明
+extern lv_obj_t * ui_cursor;
 
 // IMAGES AND IMAGE SETS
 LV_IMG_DECLARE(ui_img_1984903667);    // assets/R-Cpink.png
@@ -40,9 +44,6 @@ LV_FONT_DECLARE(ui_font_Font1);
 void ui_init(void);
 void ui_destroy(void);
 void show_message_box(const char *title, const char *message);
-
-// 鼠标光标对象(在 ui_init 内创建并绑定到触摸输入设备)
-extern lv_obj_t * ui_cursor;
 
 #ifdef __cplusplus
 } /*extern "C"*/

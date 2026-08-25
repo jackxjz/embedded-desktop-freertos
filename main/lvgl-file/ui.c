@@ -37,12 +37,6 @@ void ui_init(void)
     lv_theme_t * theme = lv_theme_default_init(dispp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED),
                                                false, LV_FONT_DEFAULT);
     lv_disp_set_theme(dispp, theme);
-    ui_Screen1_screen_init();
-    ui_Screen2_screen_init();
-    ui_Screen3_screen_init();
-    ui_Screen4_screen_init();
-    ui____initial_actions0 = lv_obj_create(NULL);
-    lv_disp_load_scr(ui_Screen1);
 
     // 初始化鼠标光标:在顶层创建一个圆形指示器,绑定到触摸输入设备
     // LVGL 会在触摸按下/移动时自动更新光标位置(点击哪里显示哪里,滑动也跟随)
@@ -64,6 +58,14 @@ void ui_init(void)
 
     // 初始位置设到屏幕中心(LVGL_PORT_H_RES/V_RES 在 lvgl_port.h 中定义)
     lv_obj_set_pos(ui_cursor, LVGL_PORT_H_RES / 2 - 8, LVGL_PORT_V_RES / 2 - 8);
+
+    ui_Screen1_screen_init();
+    ui_Screen2_screen_init();
+    ui_Screen3_screen_init();
+    ui_Screen4_screen_init();
+    ui_Screen5_screen_init();
+    ui____initial_actions0 = lv_obj_create(NULL);
+    lv_disp_load_scr(ui_Screen1);
 }
 
 void ui_destroy(void)
@@ -72,6 +74,7 @@ void ui_destroy(void)
     ui_Screen2_screen_destroy();
     ui_Screen3_screen_destroy();
     ui_Screen4_screen_destroy();
+    ui_Screen5_screen_destroy();
 }
 
 // 消息框事件处理函数

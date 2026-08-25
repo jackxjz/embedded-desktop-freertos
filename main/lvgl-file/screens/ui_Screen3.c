@@ -21,6 +21,9 @@ lv_obj_t * ui_desktop_kb = NULL;              // 桌面键盘(用于输入文件
 static lv_obj_t * selected_file_icon = NULL;  // 当前选中的文件图标
 static lv_style_t style_icon_selected;        // 选中样式(应用到图标方块上)
 static bool style_inited = false;             // 样式是否已初始化
+static lv_obj_t * ui_settings_icon = NULL;    // 设置图标(放在容器中)
+static bool settings_icon_selected = false;   // 设置图标是否被选中
+#define SETTINGS_ICON_NAME "__settings__"     // 设置图标特殊名称
 
 // 【新增】桌面长按滑动检测变量
 static bool desktop_press_moved = false;
@@ -59,7 +62,7 @@ static bool long_press_handled = false;        // 长按已被处理(显示菜�
 
 // 【新增】图标位置持久化相关
 #define ICON_POSITION_FILE "/spiffs/icon_positions.txt"   // 存储坐标的文件
-#define MAX_ICON_COUNT USER_FILE_MAX_COUNT                // 最大图标数量
+#define MAX_ICON_COUNT (USER_FILE_MAX_COUNT + 1)          // 最大图标数量(+1 给设置图标)
 typedef struct {
     char name[USER_FILE_NAME_MAX];
     lv_coord_t x;
@@ -93,7 +96,7 @@ static void load_icon_positions(void)
     fclose(fp);
 }
 
-// 【新增】保存所有图标位置到 SPIFFS
+// 【新增】保存所有图标位置到 SPIFFS（包含设置图标）
 static void save_icon_positions(void)
 {
     if (ui_file_container == NULL) return;
@@ -197,18 +200,22 @@ static void clear_selection(void)
         lv_obj_remove_style(selected_file_icon, &style_icon_selected, LV_PART_MAIN);
         selected_file_icon = NULL;
     }
+    if (settings_icon_selected && ui_settings_icon) {
+        lv_obj_remove_style(ui_settings_icon, &style_icon_selected, LV_PART_MAIN);
+        settings_icon_selected = false;
+    }
 }
 
 // 创建一个文件图标:方块图标 + 下方文件名标签
 // index 用于初始时按从左上角顺序排布
 static lv_obj_t * create_file_icon(const char *name, int index)
 {
-    // 计算初始位置:每行 3 个,从左上角开始
+    // 计算初始位置:每行 3 个,从左上角开始,避开设置图标(起始x=120)
     int icon_size = 80;
     int label_h = 20;
     int gap_x = 30;
     int gap_y = 30;
-    int start_x = 20;
+    int start_x = 120;    // 避开设置图标(默认位置20,20，宽80)
     int start_y = 20;
     int col = index % 3;
     int row = index / 3;
@@ -295,18 +302,24 @@ static void free_icon_user_data(lv_obj_t * icon)
     }
 }
 
-// 刷新桌面文件图标(从 SPIFFS 重新加载)
+// 刷新桌面文件图标(从 SPIFFS 重新加载) —— 跳过设置图标
 static void refresh_file_icons(void)
 {
     if (ui_file_container == NULL) return;
 
-    // 清除所有现有图标并释放其 user_data
+    // 清除所有现有图标并释放其 user_data，但跳过设置图标
     uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
+        const char * name = (const char *)lv_obj_get_user_data(child);
+        if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
+            continue;   // 保留设置图标
+        }
         free_icon_user_data(child);
+        lv_obj_del(child);
     }
-    lv_obj_clean(ui_file_container);   // 清空容器
+    // 由于删除了元素，重新获取容器中的子对象数量（但设置图标保留，其他被删）
+    // 重新加载文件图标（不包含设置图标）
     selected_file_icon = NULL;         // 重置选中状态
     dragging_icon = NULL;
     drag_in_progress = false;
@@ -455,11 +468,13 @@ static void file_icon_released_cb(lv_event_t * e)
 
 // 文件图标单击:
 // - 若长按已被处理(拖动或弹出菜单),忽略本次 CLICKED
+// - 若是设置图标，执行选中/跳转逻辑
 // - 若当前图标已选中,再次单击则打开文件(打开后取消选中)
 // - 若未选中或选中的是其他图标,则选中当前图标
 static void file_icon_clicked_cb(lv_event_t * e)
 {
     lv_obj_t * icon = lv_event_get_current_target(e);
+    const char * name = (const char *)lv_obj_get_user_data(icon);
 
     // 长按已处理过(拖动或弹出删除菜单),不触发单击动作
     if (long_press_handled) {
@@ -470,11 +485,28 @@ static void file_icon_clicked_cb(lv_event_t * e)
     }
     dragging_icon = NULL;
 
+    // 【新增】处理设置图标
+    if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
+        if (settings_icon_selected) {
+            // 已选中，跳转设置界面
+            lv_obj_remove_style(icon, &style_icon_selected, LV_PART_MAIN);
+            settings_icon_selected = false;
+            _ui_screen_change(&ui_Screen5, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen5_screen_init);
+        } else {
+            // 未选中，先清除其他选中，再选中自己
+            clear_selection();
+            lv_obj_add_style(icon, &style_icon_selected, LV_PART_MAIN);
+            settings_icon_selected = true;
+        }
+        return;
+    }
+
+    // 以下是文件图标处理
     if (selected_file_icon == icon) {
         // 已经选中过本图标,再次单击 -> 打开文件
-        const char * name = (const char *)lv_obj_get_user_data(icon);
-        if (name != NULL) {
-            show_open_file_dialog(name);
+        const char * fname = (const char *)lv_obj_get_user_data(icon);
+        if (fname != NULL) {
+            show_open_file_dialog(fname);
         }
         return;
     }
@@ -483,25 +515,37 @@ static void file_icon_clicked_cb(lv_event_t * e)
     if (selected_file_icon) {
         lv_obj_remove_style(selected_file_icon, &style_icon_selected, LV_PART_MAIN);
     }
-    // 高亮当前图标
+    // 同时取消设置图标的选中状态
+    if (settings_icon_selected && ui_settings_icon) {
+        lv_obj_remove_style(ui_settings_icon, &style_icon_selected, LV_PART_MAIN);
+        settings_icon_selected = false;
+    }
+    // 高亮当前文件图标
     selected_file_icon = icon;
     lv_obj_add_style(icon, &style_icon_selected, LV_PART_MAIN);
 }
 
 // 文件图标长按:
+// - 如果是设置图标，直接返回（不弹出删除菜单）
 // - 已选中 → 弹出删除菜单
 // - 未选中 → 进入拖动模式(图标跟随手指)
 static void file_icon_long_press_cb(lv_event_t * e)
 {
     lv_obj_t * icon = lv_event_get_current_target(e);
+    const char * name = (const char *)lv_obj_get_user_data(icon);
+
+    // 【新增】设置图标长按不处理
+    if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
+        return;
+    }
 
     // 标记长按已被处理,阻止后续 CLICKED 误触发
     long_press_handled = true;
 
     if (selected_file_icon == icon) {
         // 已选中:弹出删除菜单
-        const char * name = (const char *)lv_obj_get_user_data(icon);
-        if (name == NULL) return;
+        const char * fname = (const char *)lv_obj_get_user_data(icon);
+        if (fname == NULL) return;
 
         // 获取触摸点坐标,菜单显示在触摸位置
         lv_point_t point = {LVGL_PORT_H_RES / 2, LVGL_PORT_V_RES / 2};
@@ -509,7 +553,7 @@ static void file_icon_long_press_cb(lv_event_t * e)
         if (indev) {
             lv_indev_get_point(indev, &point);
         }
-        show_context_menu(point.x, point.y, true, name);
+        show_context_menu(point.x, point.y, true, fname);
     } else {
         // 未选中:进入拖动模式,后续 pressing_cb 会更新图标位置
         drag_in_progress = true;
@@ -1052,9 +1096,69 @@ void ui_Screen3_screen_init(void)
     // 从 SPIFFS 加载并渲染文件图标
     refresh_file_icons();
 
+    //====================
+    // 2.创建设置图标（与文件图标同结构，放入容器）
+    //====================
+    // 设置图标采用与文件图标相同的容器+方块+标签结构，便于统一拖动和选中
+    ui_settings_icon = lv_obj_create(ui_file_container);
+    lv_obj_clear_flag(ui_settings_icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ui_settings_icon, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_set_size(ui_settings_icon, 80, 100); // 80宽，100高（方块80+标签20）
+    lv_obj_set_style_bg_opa(ui_settings_icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ui_settings_icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ui_settings_icon, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(ui_settings_icon, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ui_settings_icon, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(ui_settings_icon, 2, LV_PART_MAIN);
+
+    // 图标方块
+    lv_obj_t * settings_btn = lv_btn_create(ui_settings_icon);
+    lv_obj_set_size(settings_btn, 80, 80);
+    lv_obj_clear_flag(settings_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(settings_btn, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_add_flag(settings_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_style_bg_color(settings_btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(settings_btn, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(settings_btn, lv_color_hex(0x888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(settings_btn, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(settings_btn, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t * settings_label = lv_label_create(settings_btn);
+    lv_label_set_text(settings_label, "SET");
+    lv_obj_set_style_text_font(settings_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(settings_label, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_center(settings_label);
+
+    // 下方文字标签
+    lv_obj_t * settings_name_label = lv_label_create(ui_settings_icon);
+    lv_label_set_text(settings_name_label, "设置");
+    lv_obj_set_style_text_font(settings_name_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(settings_name_label, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_text_align(settings_name_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(settings_name_label, 80);
+
+    // 保存特殊名称到容器 user_data
+    char * settings_name = (char *)lv_mem_alloc(strlen(SETTINGS_ICON_NAME) + 1);
+    strcpy(settings_name, SETTINGS_ICON_NAME);
+    lv_obj_set_user_data(ui_settings_icon, settings_name);
+
+    // 设置初始位置或恢复保存位置
+    lv_coord_t settings_x = 20, settings_y = 20;
+    if (get_icon_position(SETTINGS_ICON_NAME, &settings_x, &settings_y)) {
+        lv_obj_set_pos(ui_settings_icon, settings_x, settings_y);
+    } else {
+        lv_obj_set_pos(ui_settings_icon, 20, 20);
+    }
+
+    // 注册与文件图标相同的事件（长按会被跳过）
+    lv_obj_add_event_cb(ui_settings_icon, file_icon_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ui_settings_icon, file_icon_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(ui_settings_icon, file_icon_released_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ui_settings_icon, file_icon_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ui_settings_icon, file_icon_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     //====================
-    // 2.后创建退出按钮，父对象ui_Screen3，浮在file_container上层
+    // 3.后创建退出按钮，父对象ui_Screen3，浮在file_container上层
     //====================
     ui_exitbtu1 = lv_btn_create(ui_Screen3);
     lv_obj_set_width(ui_exitbtu1, 80);
@@ -1078,9 +1182,8 @@ void ui_Screen3_screen_init(void)
 
     lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
 
-
     //====================
-    // 3.键盘放在lv_layer_top()，保持原有逻辑不变
+    // 4.键盘放在lv_layer_top()，保持原有逻辑不变
     //====================
     // 创建桌面键盘(初始隐藏)
     ui_desktop_kb = lv_keyboard_create(lv_layer_top());
@@ -1097,7 +1200,7 @@ void ui_Screen3_screen_init(void)
 
 void ui_Screen3_screen_destroy(void)
 {
-    // 释放所有图标的 user_data
+    // 释放所有图标的 user_data（包括设置图标）
     if (ui_file_container) {
         uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
         for (uint32_t i = 0; i < cnt; i++) {
@@ -1114,7 +1217,9 @@ void ui_Screen3_screen_destroy(void)
     ui_Label4 = NULL;
     ui_file_container = NULL;
     ui_desktop_kb = NULL;
+    ui_settings_icon = NULL;
     selected_file_icon = NULL;
+    settings_icon_selected = false;
     newfile_panel = NULL;
     newfile_ta = NULL;
     openfile_panel = NULL;
