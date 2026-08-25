@@ -1,8 +1,0 @@
-[0/1] Re-running CMake...
--- ccache will be used for faster recompilation
--- git rev-parse returned 'fatal: not a git repository (or any of the parent directories): .git'
--- Could not use 'git describe' to determine PROJECT_VER.
--- Building ESP-IDF components for target esp32s3
--- Configuring incomplete, errors occurred!
-FAILED: build.ninja 
-D:\esp-idf\v5.3.3-tool\tools\cmake\3.30.2\bin\cmake.exe --regenerate-during-build -SD:\esp32-gc\esp32-lvgllogin\ESP32-LVGLOGIN -BD:\esp32-gc\esp32-lvgllogin\ESP32-LVGLOGIN\build
