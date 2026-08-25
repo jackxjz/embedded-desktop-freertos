@@ -128,6 +128,9 @@ extern "C" {
  */
 esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle_t tp_handle);
 
+// 全局触摸输入设备句柄(在 lvgl_port_init 内赋值,供外部绑定光标等使用)
+extern lv_indev_t *g_lvgl_indev;
+
 /**
  * @brief Take LVGL mutex
  *

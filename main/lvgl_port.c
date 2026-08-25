@@ -21,6 +21,8 @@ static const char *TAG = "lv_port";                      // 日志输出标签
 static SemaphoreHandle_t lvgl_mux;                       // LVGL互斥锁（保证线程安全，因LVGL API非线程安全）
 static TaskHandle_t lvgl_task_handle = NULL;             // LVGL主任务句柄
 
+lv_indev_t *g_lvgl_indev = NULL;                         // 全局触摸输入设备句柄(供外部绑定光标等使用)
+
 
 /* -------------------------- 屏幕旋转相关函数 -------------------------- */
 #if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0  // 如果配置了屏幕旋转（非0度），编译以下代码
@@ -636,6 +638,8 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
     if (tp_handle) {
         lv_indev_t *indev = indev_init(tp_handle);
         assert(indev);  // 确保触摸初始化成功
+        g_lvgl_indev = indev;  // 保存到全局变量供外部(如光标绑定)使用
+        g_lvgl_indev->driver->long_press_time = 1000;  // 长按触发时间设为 1000ms(1秒)
 
         // 根据屏幕旋转调整触摸坐标（保证触摸位置与显示匹配）
 #if EXAMPLE_LVGL_PORT_ROTATION_90
