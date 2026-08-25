@@ -16,13 +16,17 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "lvgl_port.h"
+#include "waveshare_rgb_lcd_port.h"   // 新增：背光开关控制
 
-static const char *TAG = "lv_port";                      // 日志输出标签
+static const char *TAG_LVGL = "lv_port";                      // 日志输出标签
 static SemaphoreHandle_t lvgl_mux;                       // LVGL互斥锁（保证线程安全，因LVGL API非线程安全）
 static TaskHandle_t lvgl_task_handle = NULL;             // LVGL主任务句柄
 
 lv_indev_t *g_lvgl_indev = NULL;                         // 全局触摸输入设备句柄(供外部绑定光标等使用)
 
+// 【新增】息屏亮屏相关
+static uint32_t last_touch_time_ms = 0;   // 最后触摸时间戳(ms)
+static bool screen_is_on = true;          // 当前屏幕是否亮屏
 
 /* -------------------------- 屏幕旋转相关函数 -------------------------- */
 #if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0  // 如果配置了屏幕旋转（非0度），编译以下代码
@@ -441,7 +445,7 @@ static lv_disp_t *display_init(esp_lcd_panel_handle_t panel_handle)
     void *buf2 = NULL;  // 备用缓冲区（双缓冲时使用）
     int buffer_size = 0;  // 缓冲区大小（像素数）
 
-    ESP_LOGD(TAG, "为LVGL分配缓冲区内存");
+    ESP_LOGD(TAG_LVGL, "为LVGL分配缓冲区内存");
 #if LVGL_PORT_AVOID_TEAR_ENABLE  // 启用防撕裂时，缓冲区需与屏幕同尺寸
     buffer_size = LVGL_PORT_H_RES * LVGL_PORT_V_RES;  // 缓冲区大小 = 分辨率（全屏）
 #if (LVGL_PORT_LCD_RGB_BUFFER_NUMS == 3) && (EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0) && LVGL_PORT_FULL_REFRESH
@@ -464,13 +468,13 @@ static lv_disp_t *display_init(esp_lcd_panel_handle_t panel_handle)
     // 分配内存（带DMA属性，确保LCD控制器可直接访问）
     buf1 = heap_caps_malloc(buffer_size * sizeof(lv_color_t), LVGL_PORT_BUFFER_MALLOC_CAPS);
     assert(buf1);  // 确保内存分配成功
-    ESP_LOGI(TAG, "LVGL缓冲区大小: %dKB", buffer_size * sizeof(lv_color_t) / 1024);
+    ESP_LOGI(TAG_LVGL, "LVGL缓冲区大小: %dKB", buffer_size * sizeof(lv_color_t) / 1024);
 #endif /* LVGL_PORT_AVOID_TEAR_ENABLE */
 
     // 初始化LVGL绘制缓冲区
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, buffer_size);
 
-    ESP_LOGD(TAG, "向LVGL注册显示驱动");
+    ESP_LOGD(TAG_LVGL, "向LVGL注册显示驱动");
     lv_disp_drv_init(&disp_drv);  // 初始化显示驱动
 
     // 根据旋转角度设置屏幕分辨率（90/270度旋转时，宽高互换）
@@ -533,9 +537,30 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         data->point.x = touchpad_x;  // 传递X坐标
         data->point.y = touchpad_y;  // 传递Y坐标
         data->state = LV_INDEV_STATE_PRESSED;  // 标记为按下状态
-        ESP_LOGD(TAG, "触摸位置: %d,%d", touchpad_x, touchpad_y);
+        ESP_LOGD(TAG_LVGL, "触摸位置: %d,%d", touchpad_x, touchpad_y);
+
+        // 【新增】息屏唤醒：如果当前黑屏，先亮屏
+        if (!screen_is_on) {
+            wavesahre_rgb_lcd_bl_on();
+            screen_is_on = true;
+        }
+        last_touch_time_ms = lv_tick_get();  // 更新最后触摸时间
     } else {  // 无触摸
         data->state = LV_INDEV_STATE_RELEASED;  // 标记为释放状态
+    }
+}
+
+// 【新增】屏幕超时息屏定时器回调
+static void screen_timeout_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!screen_is_on) return;  // 已经息屏了，不再处理
+
+    uint32_t idle_time = lv_tick_get() - last_touch_time_ms;
+    if (idle_time >= 10000) {   // 10秒 = 10000ms
+        ESP_LOGI(TAG_LVGL, "10秒无触摸，自动息屏");
+        wavesahre_rgb_lcd_bl_off();
+        screen_is_on = false;
     }
 }
 
@@ -596,7 +621,7 @@ static esp_err_t tick_init(void)
  */
 static void lvgl_port_task(void *arg)
 {
-    ESP_LOGD(TAG, "启动LVGL任务");
+    ESP_LOGD(TAG_LVGL, "启动LVGL任务");
 
     uint32_t task_delay_ms = LVGL_PORT_TASK_MAX_DELAY_MS;  // 初始延迟时间
     while (1) {
@@ -658,7 +683,7 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
     lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);  // 确保锁创建成功
 
-    ESP_LOGI(TAG, "创建LVGL任务");
+    ESP_LOGI(TAG_LVGL, "创建LVGL任务");
     // 确定任务运行的CPU核心（-1表示不指定）
     BaseType_t core_id = (LVGL_PORT_TASK_CORE < 0) ? tskNO_AFFINITY : LVGL_PORT_TASK_CORE;
     // 创建LVGL主任务
@@ -666,9 +691,13 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
                                              LVGL_PORT_TASK_STACK_SIZE, NULL,
                                              LVGL_PORT_TASK_PRIORITY, &lvgl_task_handle, core_id);
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "创建LVGL任务失败");
+        ESP_LOGE(TAG_LVGL, "创建LVGL任务失败");
         return ESP_FAIL;
     }
+
+    // 【新增】初始化时间戳并创建超时检测定时器（每500ms检查一次）
+    last_touch_time_ms = lv_tick_get();
+    lv_timer_create(screen_timeout_timer_cb, 500, NULL);
 
     return ESP_OK;
 }

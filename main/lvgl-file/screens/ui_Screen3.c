@@ -145,25 +145,25 @@ static void show_context_menu(int x, int y, bool is_file, const char *file_name)
 static void clear_selection(void);
 
 // event funtions
-// void ui_event_exitbtu1(lv_event_t * e)
-// {
-//     lv_event_code_t event_code = lv_event_get_code(e);
+void ui_event_exitbtu1(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
 
-//     if(event_code == LV_EVENT_CLICKED) {
-//         char account[MAX_ACCOUNT_LENGTH] = {0};
-//         char password[MAX_PASSWORD_LENGTH] = {0};
-//         if(read_text_from_nvs(account, MAX_ACCOUNT_LENGTH, "acc") == ESP_OK)
-//         {
-//             if(read_text_from_nvs(password, MAX_PASSWORD_LENGTH, "pwd") == ESP_OK)
-//             {
-//                 lv_textarea_set_text(ui_zhanghao, account);
-//                 lv_textarea_set_text(ui_mima, password);
-//                 lv_obj_add_state(ui_jizhu, LV_STATE_CHECKED);
-//             }
-//         }
-//         _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen1_screen_init);
-//     }
-// }
+    if(event_code == LV_EVENT_CLICKED) {
+        char account[MAX_ACCOUNT_LENGTH] = {0};
+        char password[MAX_PASSWORD_LENGTH] = {0};
+        if(read_text_from_nvs(account, MAX_ACCOUNT_LENGTH, "acc") == ESP_OK)
+        {
+            if(read_text_from_nvs(password, MAX_PASSWORD_LENGTH, "pwd") == ESP_OK)
+            {
+                lv_textarea_set_text(ui_zhanghao, account);
+                lv_textarea_set_text(ui_mima, password);
+                lv_obj_add_state(ui_jizhu, LV_STATE_CHECKED);
+            }
+        }
+        _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen1_screen_init);
+    }
+}
 
 // 初始化选中样式(只初始化一次)
 static void init_icon_style(void)
@@ -1026,28 +1026,9 @@ void ui_Screen3_screen_init(void)
     lv_obj_set_style_bg_img_src(ui_Screen3, &ui_img_1984903667, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_Screen3, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    // ui_exitbtu1 = lv_btn_create(ui_Screen3);
-    // lv_obj_set_width(ui_exitbtu1, 80);
-    // lv_obj_set_height(ui_exitbtu1, 40);
-    // lv_obj_set_x(ui_exitbtu1, 350);
-    // lv_obj_set_y(ui_exitbtu1, -200);
-    // lv_obj_set_align(ui_exitbtu1, LV_ALIGN_CENTER);
-    // lv_obj_add_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
-    // lv_obj_clear_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-    // lv_obj_set_style_bg_color(ui_exitbtu1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    // lv_obj_set_style_bg_opa(ui_exitbtu1, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    ui_Label4 = lv_label_create(ui_exitbtu1);
-    lv_obj_set_width(ui_Label4, LV_SIZE_CONTENT);   /// 1
-    lv_obj_set_height(ui_Label4, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_Label4, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_Label4, "退出");
-    lv_obj_set_style_text_color(ui_Label4, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_opa(ui_Label4, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(ui_Label4, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    // lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
-
+    //====================
+    // 1.先创建全屏文件容器（底层）
+    //====================
     // 初始化图标样式
     init_icon_style();
 
@@ -1068,6 +1049,39 @@ void ui_Screen3_screen_init(void)
     // 在容器上注册长按事件(用作"鼠标右键"弹出右键菜单)
     lv_obj_add_event_cb(ui_file_container, desktop_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
+    // 从 SPIFFS 加载并渲染文件图标
+    refresh_file_icons();
+
+
+    //====================
+    // 2.后创建退出按钮，父对象ui_Screen3，浮在file_container上层
+    //====================
+    ui_exitbtu1 = lv_btn_create(ui_Screen3);
+    lv_obj_set_width(ui_exitbtu1, 80);
+    lv_obj_set_height(ui_exitbtu1, 40);
+    // 删除旧的 set_x / set_y / set_align(CENTER)，改用右上角对齐
+    lv_obj_align(ui_exitbtu1, LV_ALIGN_TOP_RIGHT, -12, 12);
+
+    lv_obj_add_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_exitbtu1, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_bg_color(ui_exitbtu1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_exitbtu1, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_Label4 = lv_label_create(ui_exitbtu1);
+    lv_obj_set_width(ui_Label4, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_Label4, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_Label4, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_Label4, "退出");
+    lv_obj_set_style_text_color(ui_Label4, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_Label4, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_Label4, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
+
+
+    //====================
+    // 3.键盘放在lv_layer_top()，保持原有逻辑不变
+    //====================
     // 创建桌面键盘(初始隐藏)
     ui_desktop_kb = lv_keyboard_create(lv_layer_top());
     lv_obj_set_width(ui_desktop_kb, 800);
@@ -1079,9 +1093,6 @@ void ui_Screen3_screen_init(void)
     lv_keyboard_set_mode(ui_desktop_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
     // 新增：绑定READY回车回调
     lv_obj_add_event_cb(ui_desktop_kb, desktop_kb_ready_cb, LV_EVENT_ALL, NULL);
-
-    // 从 SPIFFS 加载并渲染文件图标
-    refresh_file_icons();
 }
 
 void ui_Screen3_screen_destroy(void)

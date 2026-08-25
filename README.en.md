@@ -32,7 +32,13 @@ This project is a FreeRTOS desktop OS simulator running on ESP32, developed for 
 
 All software changes are documented here.
 
-### v2.1.0
+### v2.2
+
+#### Added
+- Add idle timeout auto-sleep: screen turns off after 10 seconds of inactivity
+- Support touch-to-wake: display restores to valid desktop state on touch input
+
+### v2.1
 
 #### Added
 - Mouse cursor rendering with touch position tracking
@@ -41,19 +47,19 @@ All software changes are documented here.
 #### Improved
 - File uniqueness validation mechanism to prevent duplicate filenames
 
-### v2.0.0
+### v2.0
 
 #### Added
 - New desktop main interface with application icon rendering
 - File management based on SPIFFS: create and delete operations
 - Desktop supports file selection and opening; file editor supports exit and return to desktop
 
-### v1.3.0
+### v1.3
 
 #### Added
 - Password error feedback: lock for 10 seconds after 3 consecutive failed attempts
 
-### v1.2.0
+### v1.2
 
 #### Added
 - User account management page
@@ -64,7 +70,7 @@ All software changes are documented here.
 - Enhanced username/password error prompts: popup notifications for incorrect credentials or empty password fields
 - Improved login page input focus management and on-screen keyboard adaptation
 
-### v1.1.0
+### v1.1
 
 #### Added
 - User terms confirmation option added to login flow
@@ -74,7 +80,7 @@ All software changes are documented here.
 #### Improved
 - Optimized registration flow: real-time username uniqueness validation with conflict prevention
 
-### v1.0.0
+### v1.0
 
 #### Added
 - Initial release based on ESP32-S3 + FreeRTOS + LVGL
