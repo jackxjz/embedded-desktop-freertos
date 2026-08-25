@@ -1,55 +1,62 @@
-# Prerequisites
-*.d
+# ============================================
+# ESP-IDF Build Output
+# ============================================
+build/
+build_*/
+sdkconfig.old
+sdkconfig.defaults.old
 
-# Object files
-*.o
-*.ko
-*.obj
+# ============================================
+# ESP-IDF Generated Files
+# ============================================
+managed_components/
+dependencies.lock
+*.bin
 *.elf
-
-# Linker output
-*.ilk
 *.map
-*.exp
+*.uf2
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
+# ============================================
+# C / Embedded Build Artifacts
+# ============================================
+*.o
+*.obj
 *.a
-*.la
+*.lib
 *.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
+*.la
 *.so
-*.so.*
+*.dll
 *.dylib
-
-# Executables
 *.exe
 *.out
 *.app
-*.i*86
-*.x86_64
-*.hex
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# ============================================
+# IDE / Editor
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# ============================================
+# CMake
+# ============================================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+_deps/
 
-# debug information files
-*.dwo
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
