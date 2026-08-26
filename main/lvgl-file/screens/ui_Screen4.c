@@ -6,6 +6,7 @@
 #include "../ui.h"
 #include "../../spiffs.h"
 #include "../../nvs.h"
+#include "../../buzzer.h"          // 蜂鸣器驱动
 
 lv_obj_t * ui_Screen4 = NULL;
 lv_obj_t * ui_exitbtu2 = NULL;
@@ -62,6 +63,9 @@ void delete_btn_click_event(lv_event_t * e) {
     // 重置选中状态
     selected_item = NULL;
     selected_account[0] = '\0';
+    
+    // 删除成功后蜂鸣器响一声
+    buzzer_beep();
     
     show_message_box("成功", "账号已删除");
 }

@@ -6,6 +6,7 @@
 #include "../ui.h"
 #include "../../spiffs.h"
 #include "../../nvs.h"
+#include "../../buzzer.h"          // 新增：蜂鸣器驱动
 
 lv_obj_t * ui_Screen1 = NULL;
 lv_obj_t * ui_login = NULL;
@@ -149,6 +150,9 @@ void ui_event_loginbtu1(lv_event_t * e)
 
         // 检查账号和密码是否匹配
         if (!check_account(account, password)) {
+            // 密码错误时蜂鸣器响一声
+            buzzer_beep();
+
             login_fail_count++;      // 累加连续失败次数
 
             if (login_fail_count >= MAX_FAIL_COUNT) {

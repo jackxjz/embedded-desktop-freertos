@@ -8,10 +8,11 @@
 #include "../../nvs.h"
 #include "../../lvgl_port.h"
 #include "../../wifi_sync.h"
-#include <stdio.h>      //【新增】用于文件操作
-#include <stdlib.h>     //【新增】用于 atoi
-#include <string.h>     //【新增】
-#include <time.h>       //【新增】用于获取本地时间
+#include "../../buzzer.h"          // 蜂鸣器驱动
+#include <stdio.h>      // 用于文件操作
+#include <stdlib.h>     // 用于 atoi
+#include <string.h>     
+#include <time.h>       // 用于获取本地时间
 
 lv_obj_t * ui_Screen3 = NULL;
 lv_obj_t * ui_exitbtu1 = NULL;
@@ -30,6 +31,9 @@ static bool style_inited = false;             // 样式是否已初始化
 static lv_obj_t * ui_settings_icon = NULL;    // 设置图标(放在容器中)
 static bool settings_icon_selected = false;   // 设置图标是否被选中
 #define SETTINGS_ICON_NAME "__settings__"     // 设置图标特殊名称
+static lv_obj_t * ui_draw_icon = NULL;        // 画图图标(放在容器中)
+static bool draw_icon_selected = false;       // 画图图标是否被选中
+#define DRAW_ICON_NAME "__draw__"             // 画图图标特殊名称
 
 // 桌面长按滑动检测变量
 static bool desktop_press_moved = false;
@@ -40,6 +44,11 @@ static lv_coord_t desktop_press_start_y = 0;
 // 新建文件对话框相关对象
 static lv_obj_t * newfile_panel = NULL;        // 新建文件面板
 static lv_obj_t * newfile_ta = NULL;           // 文件名输入框
+
+//  重命名相关对象
+static lv_obj_t * rename_panel = NULL;          // 重命名面板
+static lv_obj_t * rename_ta = NULL;             // 新文件名输入框
+static char rename_old_name[USER_FILE_NAME_MAX] = {0}; // 原文件名
 
 // 打开文件对话框相关对象
 static lv_obj_t * openfile_panel = NULL;       // 打开文件面板
@@ -66,7 +75,7 @@ static lv_coord_t icon_start_y = 0;
 static bool drag_in_progress = false;          // 是否已进入拖动状态(长按触发)
 static bool long_press_handled = false;        // 长按已被处理(显示菜单或进入拖动),用于阻止后续 CLICKED
 
-// 【新增】图标位置持久化相关
+//  图标位置持久化相关
 #define ICON_POSITION_FILE "/spiffs/icon_positions.txt"   // 存储坐标的文件
 #define MAX_ICON_COUNT (USER_FILE_MAX_COUNT + 1)          // 最大图标数量(+1 给设置图标)
 typedef struct {
@@ -77,7 +86,7 @@ typedef struct {
 static icon_pos_t icon_positions[MAX_ICON_COUNT];   // 加载的坐标表
 static int icon_pos_count = 0;                      // 有效坐标数量
 
-// 【新增】加载图标位置（从 SPIFFS 读取）
+//  加载图标位置（从 SPIFFS 读取）
 static void load_icon_positions(void)
 {
     icon_pos_count = 0;
@@ -102,7 +111,7 @@ static void load_icon_positions(void)
     fclose(fp);
 }
 
-// 【新增】保存所有图标位置到 SPIFFS（包含设置图标）
+//  保存所有图标位置到 SPIFFS（包含设置图标）
 static void save_icon_positions(void)
 {
     if (ui_file_container == NULL) return;
@@ -123,7 +132,7 @@ static void save_icon_positions(void)
     fclose(fp);
 }
 
-// 【新增】从坐标表中查询指定文件名的坐标，若存在则返回 true 并填充坐标
+//  从坐标表中查询指定文件名的坐标，若存在则返回 true 并填充坐标
 static bool get_icon_position(const char *name, lv_coord_t *x, lv_coord_t *y)
 {
     for (int i = 0; i < icon_pos_count; i++) {
@@ -152,6 +161,11 @@ static void show_open_file_dialog(const char *name);
 static void close_context_menu(void);
 static void show_context_menu(int x, int y, bool is_file, const char *file_name);
 static void clear_selection(void);
+//  重命名函数声明
+static void show_rename_dialog(const char *old_name);
+static void rename_confirm_cb(lv_event_t * e);
+static void rename_cancel_cb(lv_event_t * e);
+static void rename_ta_clicked_cb(lv_event_t * e);
 
 // event funtions
 void ui_event_exitbtu1(lv_event_t * e)
@@ -218,6 +232,10 @@ static void clear_selection(void)
     if (settings_icon_selected && ui_settings_icon) {
         lv_obj_remove_style(ui_settings_icon, &style_icon_selected, LV_PART_MAIN);
         settings_icon_selected = false;
+    }
+    if (draw_icon_selected && ui_draw_icon) {
+        lv_obj_remove_style(ui_draw_icon, &style_icon_selected, LV_PART_MAIN);
+        draw_icon_selected = false;
     }
 }
 
@@ -317,7 +335,7 @@ static void free_icon_user_data(lv_obj_t * icon)
     }
 }
 
-// 刷新桌面文件图标(从 SPIFFS 重新加载) —— 跳过设置图标
+// 刷新桌面文件图标(从 SPIFFS 重新加载) —— 跳过设置图标和画图图标
 static void refresh_file_icons(void)
 {
     if (ui_file_container == NULL) return;
@@ -327,8 +345,9 @@ static void refresh_file_icons(void)
     for (int32_t i = cnt - 1; i >= 0; i--) {
         lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
         const char * name = (const char *)lv_obj_get_user_data(child);
-        if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
-            continue;   // 保留设置图标
+        // 保留设置图标和画图图标
+        if (name && (strcmp(name, SETTINGS_ICON_NAME) == 0 || strcmp(name, DRAW_ICON_NAME) == 0)) {
+            continue;
         }
         free_icon_user_data(child);
         lv_obj_del(child);
@@ -352,7 +371,7 @@ static void refresh_file_icons(void)
     }
 }
 
-//【新增】桌面容器按下，记录起始坐标，重置滑动标记
+// 桌面容器按下，记录起始坐标，重置滑动标记
 static void desktop_pressed_cb(lv_event_t * e)
 {
     (void)e;
@@ -367,7 +386,7 @@ static void desktop_pressed_cb(lv_event_t * e)
     }
 }
 
-//【新增】桌面容器按住移动，检测是否发生滑动
+// 桌面容器按住移动，检测是否发生滑动
 static void desktop_pressing_cb(lv_event_t * e)
 {
     (void)e;
@@ -471,7 +490,7 @@ static void file_icon_pressing_cb(lv_event_t * e)
 static void file_icon_released_cb(lv_event_t * e)
 {
     (void)e;
-    // 【新增】如果发生了拖动，保存所有图标位置
+    //  如果发生了拖动，保存所有图标位置
     if (drag_in_progress) {
         save_icon_positions();
     }
@@ -499,7 +518,7 @@ static void file_icon_clicked_cb(lv_event_t * e)
     }
     dragging_icon = NULL;
 
-    // 【新增】处理设置图标
+    //  处理设置图标
     if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
         if (settings_icon_selected) {
             // 已选中，跳转设置界面
@@ -511,6 +530,22 @@ static void file_icon_clicked_cb(lv_event_t * e)
             clear_selection();
             lv_obj_add_style(icon, &style_icon_selected, LV_PART_MAIN);
             settings_icon_selected = true;
+        }
+        return;
+    }
+
+    //  处理画图图标
+    if (name && strcmp(name, DRAW_ICON_NAME) == 0) {
+        if (draw_icon_selected) {
+            // 已选中，跳转绘图界面
+            lv_obj_remove_style(icon, &style_icon_selected, LV_PART_MAIN);
+            draw_icon_selected = false;
+            _ui_screen_change(&ui_Screen6, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen6_screen_init);
+        } else {
+            // 未选中，先清除其他选中，再选中自己
+            clear_selection();
+            lv_obj_add_style(icon, &style_icon_selected, LV_PART_MAIN);
+            draw_icon_selected = true;
         }
         return;
     }
@@ -548,8 +583,13 @@ static void file_icon_long_press_cb(lv_event_t * e)
     lv_obj_t * icon = lv_event_get_current_target(e);
     const char * name = (const char *)lv_obj_get_user_data(icon);
 
-    // 【新增】设置图标长按不处理
+    //  设置图标长按不处理
     if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
+        return;
+    }
+
+    //  画图图标长按不处理
+    if (name && strcmp(name, DRAW_ICON_NAME) == 0) {
         return;
     }
 
@@ -617,6 +657,17 @@ static void menu_item_delete_cb(lv_event_t * e)
     show_delete_confirm(name_copy);
 }
 
+//  重命名菜单项回调
+static void menu_item_rename_cb(lv_event_t * e)
+{
+    (void)e;
+    char name_copy[USER_FILE_NAME_MAX];
+    strncpy(name_copy, context_menu_file_name, USER_FILE_NAME_MAX - 1);
+    name_copy[USER_FILE_NAME_MAX - 1] = '\0';
+    close_context_menu();
+    show_rename_dialog(name_copy);
+}
+
 // 显示右键菜单
 // x, y: 菜单显示位置(触摸点坐标)
 // is_file: true=文件菜单(显示"删除"), false=桌面菜单(显示"新建")
@@ -643,10 +694,11 @@ static void show_context_menu(int x, int y, bool is_file, const char *file_name)
     lv_obj_clear_flag(context_menu_bg, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(context_menu_bg, context_menu_bg_click_cb, LV_EVENT_CLICKED, NULL);
 
-    // 创建菜单面板
+    // 菜单高度根据 is_file 调整：文件菜单需要两个按钮，高度增大
+    int menu_h = is_file ? 80 : 50;
     context_menu = lv_obj_create(lv_layer_top());
     lv_obj_clear_flag(context_menu, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(context_menu, 120, 50);
+    lv_obj_set_size(context_menu, 120, menu_h);
     lv_obj_set_style_bg_color(context_menu, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(context_menu, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(context_menu, lv_color_hex(0x333333), LV_PART_MAIN);
@@ -658,29 +710,222 @@ static void show_context_menu(int x, int y, bool is_file, const char *file_name)
     int menu_x = x;
     int menu_y = y;
     if (menu_x + 120 > LVGL_PORT_H_RES) menu_x = LVGL_PORT_H_RES - 120;
-    if (menu_y + 50 > LVGL_PORT_V_RES) menu_y = LVGL_PORT_V_RES - 50;
+    if (menu_y + menu_h > LVGL_PORT_V_RES) menu_y = LVGL_PORT_V_RES - menu_h;
     if (menu_x < 0) menu_x = 0;
     if (menu_y < 0) menu_y = 0;
     lv_obj_set_pos(context_menu, menu_x, menu_y);
 
-    // 创建菜单项按钮
-    lv_obj_t * btn = lv_btn_create(context_menu);
-    lv_obj_set_size(btn, 110, 38);
-    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t * label = lv_label_create(btn);
     if (is_file) {
-        lv_label_set_text(label, "删除");
-    } else {
-        lv_label_set_text(label, "新建");
-    }
-    lv_obj_set_style_text_font(label, &ui_font_Font1, LV_PART_MAIN);
-    lv_obj_center(label);
+        // 两个按钮：删除（上），重命名（下）
+        lv_obj_t * btn_del = lv_btn_create(context_menu);
+        lv_obj_set_size(btn_del, 110, 30);
+        lv_obj_align(btn_del, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_clear_flag(btn_del, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t * label_del = lv_label_create(btn_del);
+        lv_label_set_text(label_del, "删除");
+        lv_obj_set_style_text_font(label_del, &ui_font_Font1, LV_PART_MAIN);
+        lv_obj_center(label_del);
+        lv_obj_add_event_cb(btn_del, menu_item_delete_cb, LV_EVENT_CLICKED, NULL);
 
-    if (is_file) {
-        lv_obj_add_event_cb(btn, menu_item_delete_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t * btn_rename = lv_btn_create(context_menu);
+        lv_obj_set_size(btn_rename, 110, 30);
+        lv_obj_align(btn_rename, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_clear_flag(btn_rename, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t * label_rename = lv_label_create(btn_rename);
+        lv_label_set_text(label_rename, "重命名");
+        lv_obj_set_style_text_font(label_rename, &ui_font_Font1, LV_PART_MAIN);
+        lv_obj_center(label_rename);
+        lv_obj_add_event_cb(btn_rename, menu_item_rename_cb, LV_EVENT_CLICKED, NULL);
     } else {
+        // 仅“新建”按钮
+        lv_obj_t * btn = lv_btn_create(context_menu);
+        lv_obj_set_size(btn, 110, 38);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t * label = lv_label_create(btn);
+        lv_label_set_text(label, "新建");
+        lv_obj_set_style_text_font(label, &ui_font_Font1, LV_PART_MAIN);
+        lv_obj_center(label);
         lv_obj_add_event_cb(btn, menu_item_new_cb, LV_EVENT_CLICKED, NULL);
+    }
+}
+
+// ---------------- 重命名对话框 ----------------
+
+static void show_rename_dialog(const char *old_name)
+{
+    if (rename_panel) {
+        lv_obj_del(rename_panel);
+        rename_panel = NULL;
+        rename_ta = NULL;
+    }
+    if (old_name) {
+        strncpy(rename_old_name, old_name, USER_FILE_NAME_MAX - 1);
+        rename_old_name[USER_FILE_NAME_MAX - 1] = '\0';
+    } else {
+        rename_old_name[0] = '\0';
+        return;
+    }
+
+    rename_panel = lv_obj_create(ui_Screen3);
+    lv_obj_set_size(rename_panel, 300, 180);
+    lv_obj_center(rename_panel);
+    lv_obj_clear_flag(rename_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(rename_panel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(rename_panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(rename_panel, lv_color_hex(0x337ab7), LV_PART_MAIN);
+    lv_obj_set_style_border_width(rename_panel, 2, LV_PART_MAIN);
+
+    lv_obj_t * title = lv_label_create(rename_panel);
+    lv_label_set_text(title, "重命名文件");
+    lv_obj_set_style_text_font(title, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
+
+    rename_ta = lv_textarea_create(rename_panel);
+    lv_obj_set_size(rename_ta, 200, 40);
+    lv_obj_align(rename_ta, LV_ALIGN_TOP_MID, 0, 40);
+    lv_textarea_set_placeholder_text(rename_ta, "输入新文件名");
+    lv_textarea_set_text(rename_ta, rename_old_name); // 默认显示原文件名
+    lv_textarea_set_one_line(rename_ta, true);
+    lv_obj_set_style_text_font(rename_ta, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_add_event_cb(rename_ta, rename_ta_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * btn_ok = lv_btn_create(rename_panel);
+    lv_obj_set_size(btn_ok, 70, 35);
+    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    lv_obj_clear_flag(btn_ok, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, "确定");
+    lv_obj_set_style_text_font(lbl_ok, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_ok);
+    lv_obj_add_event_cb(btn_ok, rename_confirm_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * btn_cancel = lv_btn_create(rename_panel);
+    lv_obj_set_size(btn_cancel, 70, 35);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "取消");
+    lv_obj_set_style_text_font(lbl_cancel, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, rename_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    // 弹出键盘
+    if (ui_desktop_kb) {
+        lv_obj_clear_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_desktop_kb, rename_ta);
+    }
+}
+
+static void rename_ta_clicked_cb(lv_event_t * e)
+{
+    (void)e;
+    if (ui_desktop_kb) {
+        lv_obj_clear_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_desktop_kb, rename_ta);
+    }
+}
+
+static void rename_confirm_cb(lv_event_t * e)
+{
+    (void)e;
+    const char * new_name = lv_textarea_get_text(rename_ta);
+    if (new_name == NULL || new_name[0] == '\0') {
+        show_message_box("提示", "新文件名不能为空!");
+        return;
+    }
+    if (strlen(new_name) >= USER_FILE_NAME_MAX) {
+        show_message_box("提示", "文件名过长!");
+        return;
+    }
+    for (const char *p = new_name; *p; p++) {
+        if (*p == ',' || *p == '/' || *p == '\\') {
+            show_message_box("提示", "文件名含非法字符!");
+            return;
+        }
+    }
+    // 检查是否与原文件名相同
+    if (strcmp(new_name, rename_old_name) == 0) {
+        // 相同，关闭对话框即可
+        if (rename_panel) {
+            lv_obj_del(rename_panel);
+            rename_panel = NULL;
+            rename_ta = NULL;
+        }
+        if (ui_desktop_kb) {
+            lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    // 检查新文件名是否已存在
+    if (is_user_file_exists(new_name)) {
+        show_message_box("提示", "同名文件已存在!");
+        return;
+    }
+    // 执行重命名
+    char old_path[64], new_path[64];
+    get_user_file_path(rename_old_name, old_path, sizeof(old_path));
+    get_user_file_path(new_name, new_path, sizeof(new_path));
+    if (rename(old_path, new_path) != 0) {
+        show_message_box("错误", "重命名失败!");
+        return;
+    }
+    // 更新图标位置文件：删除旧名条目，添加新名条目
+    // 读取旧坐标
+    lv_coord_t x, y;
+    if (get_icon_position(rename_old_name, &x, &y)) {
+        // 从内存坐标表中删除旧名，添加新名
+        // 简便方法：重写整个坐标文件
+        // 由于 save_icon_positions 会基于当前容器子对象保存，而容器中的图标名称还未更新，所以需要先更新 user_data
+        // 找到对应的图标对象，更新其 user_data
+        uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
+        for (uint32_t i = 0; i < cnt; i++) {
+            lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
+            const char * child_name = (const char *)lv_obj_get_user_data(child);
+            if (child_name && strcmp(child_name, rename_old_name) == 0) {
+                // 释放旧名称，保存新名称
+                free_icon_user_data(child);
+                char * name_copy = (char *)lv_mem_alloc(strlen(new_name) + 1);
+                if (name_copy) {
+                    strcpy(name_copy, new_name);
+                    lv_obj_set_user_data(child, name_copy);
+                }
+                // 同时更新图标下方的标签文字
+                // 获取该图标容器下的 name_label（第二个子对象，索引1）
+                lv_obj_t * name_label = lv_obj_get_child(child, 1);
+                if (name_label) {
+                    lv_label_set_text(name_label, new_name);
+                }
+                break;
+            }
+        }
+        // 保存坐标（将用新名称更新）
+        save_icon_positions();
+    }
+    // 关闭对话框
+    if (rename_panel) {
+        lv_obj_del(rename_panel);
+        rename_panel = NULL;
+        rename_ta = NULL;
+    }
+    if (ui_desktop_kb) {
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+    // 刷新图标（确保一致性，其实上面已经改了，但为了安全，刷新一下）
+    refresh_file_icons();
+    show_message_box("成功", "文件重命名成功!");
+}
+
+static void rename_cancel_cb(lv_event_t * e)
+{
+    (void)e;
+    if (rename_panel) {
+        lv_obj_del(rename_panel);
+        rename_panel = NULL;
+        rename_ta = NULL;
+    }
+    if (ui_desktop_kb) {
+        lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -935,6 +1180,9 @@ static void openfile_close_cb(lv_event_t * e)
 {
     (void)e;
     if (openfile_dirty) {
+        // 文件未保存关闭时，蜂鸣器响一声
+        buzzer_beep();
+
         // 有未保存的修改,弹出确认框
         static const char * btns[] = {"不保存", "取消", ""};
         lv_obj_t * mbox = lv_msgbox_create(NULL, "提示", "文件未保存,是否放弃修改?", btns, false);
@@ -1195,6 +1443,61 @@ void ui_Screen3_screen_init(void)
     lv_obj_add_event_cb(ui_settings_icon, file_icon_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     //====================
+    // 2.5 创建画图应用图标（放在设置图标下方）
+    //====================
+    ui_draw_icon = lv_obj_create(ui_file_container);
+    lv_obj_clear_flag(ui_draw_icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ui_draw_icon, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_set_size(ui_draw_icon, 80, 100);
+    lv_obj_set_style_bg_opa(ui_draw_icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ui_draw_icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ui_draw_icon, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(ui_draw_icon, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ui_draw_icon, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(ui_draw_icon, 2, LV_PART_MAIN);
+
+    // 图标方块
+    lv_obj_t * draw_btn = lv_btn_create(ui_draw_icon);
+    lv_obj_set_size(draw_btn, 80, 80);
+    lv_obj_clear_flag(draw_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(draw_btn, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_add_flag(draw_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_style_bg_color(draw_btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(draw_btn, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(draw_btn, lv_color_hex(0x888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(draw_btn, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(draw_btn, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t * draw_label = lv_label_create(draw_btn);
+    lv_label_set_text(draw_label, "DRAW");
+    lv_obj_set_style_text_font(draw_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(draw_label, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_center(draw_label);
+
+    // 下方文字标签
+    lv_obj_t * draw_name_label = lv_label_create(ui_draw_icon);
+    lv_label_set_text(draw_name_label, "画图");
+    lv_obj_set_style_text_font(draw_name_label, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_set_style_text_color(draw_name_label, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_text_align(draw_name_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(draw_name_label, 80);
+
+    // 保存特殊名称到容器 user_data
+    char * draw_name = (char *)lv_mem_alloc(strlen(DRAW_ICON_NAME) + 1);
+    strcpy(draw_name, DRAW_ICON_NAME);
+    lv_obj_set_user_data(ui_draw_icon, draw_name);
+
+    // 设置初始位置:放在设置图标正下方(20, 130)
+    lv_obj_set_pos(ui_draw_icon, 20, 130);
+
+    // 注册事件(与设置图标相同,长按会被跳过)
+    lv_obj_add_event_cb(ui_draw_icon, file_icon_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ui_draw_icon, file_icon_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(ui_draw_icon, file_icon_released_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ui_draw_icon, file_icon_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ui_draw_icon, file_icon_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
+
+    //====================
     // 3.后创建退出按钮，父对象ui_Screen3，浮在file_container上层
     //====================
     ui_exitbtu1 = lv_btn_create(ui_Screen3);
@@ -1273,9 +1576,9 @@ void ui_Screen3_screen_init(void)
     lv_obj_align(ui_desktop_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(ui_desktop_kb, LV_OBJ_FLAG_HIDDEN);
 
-    // 新增：设置文本模式，显示READY(回车完成)按键
+    // 设置文本模式，显示READY(回车完成)按键
     lv_keyboard_set_mode(ui_desktop_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    // 新增：绑定READY回车回调
+    // 绑定READY回车回调
     lv_obj_add_event_cb(ui_desktop_kb, desktop_kb_ready_cb, LV_EVENT_ALL, NULL);
 }
 
@@ -1303,8 +1606,10 @@ void ui_Screen3_screen_destroy(void)
     ui_file_container = NULL;
     ui_desktop_kb = NULL;
     ui_settings_icon = NULL;
+    ui_draw_icon = NULL;
     selected_file_icon = NULL;
     settings_icon_selected = false;
+    draw_icon_selected = false;
     newfile_panel = NULL;
     newfile_ta = NULL;
     openfile_panel = NULL;
@@ -1321,4 +1626,8 @@ void ui_Screen3_screen_destroy(void)
     drag_in_progress = false;
     long_press_handled = false;
     desktop_press_moved = false;
+    // 重命名相关清理
+    rename_panel = NULL;
+    rename_ta = NULL;
+    rename_old_name[0] = '\0';
 }
