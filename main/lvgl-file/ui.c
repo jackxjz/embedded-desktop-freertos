@@ -64,6 +64,8 @@ void ui_init(void)
     ui_Screen3_screen_init();
     ui_Screen4_screen_init();
     ui_Screen5_screen_init();
+    // 注意:ui_Screen6 不在开机时预创建(占用 PSRAM 约 300KB)
+    // 按需从桌面"画图"图标跳转时由 _ui_screen_change 自动调用 init
     ui____initial_actions0 = lv_obj_create(NULL);
     lv_disp_load_scr(ui_Screen1);
 }
@@ -75,6 +77,7 @@ void ui_destroy(void)
     ui_Screen3_screen_destroy();
     ui_Screen4_screen_destroy();
     ui_Screen5_screen_destroy();
+    ui_Screen6_screen_destroy();
 }
 
 // 消息框事件处理函数

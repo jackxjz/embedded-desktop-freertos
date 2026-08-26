@@ -50,6 +50,38 @@ This project is the work for the **2026 Electronic Technology Association Embedd
 
 All software changes are recorded here.
 
+### v4.0
+
+#### Added
+
+- Brand new Drawing app, accessible from the desktop icon
+- 480×320 LVGL Canvas centered on screen for freehand drawing
+- Continuous touch drawing: point on press, line on drag, stop on release for smooth painting experience
+- Drawing export and save to SPIFFS with non-white pixel compression for storage efficiency
+- Auto-load saved drawing on app launch, enabling power-off recovery
+- Clear canvas function: reset to white background and delete stored file
+
+#### Improved
+
+- Canvas buffer preferentially allocated from PSRAM (8MB) to reduce internal RAM usage and improve large canvas stability
+- Graceful error handling with user-friendly prompt when memory allocation fails
+- Automatic canvas buffer release on app exit to prevent memory leaks
+
+### v3.3
+
+#### Added
+
+- Added passive buzzer hardware adaptation to provide system sound feedback
+- Added a volume adjustment slider in the Settings app for controlling system prompt tone volume
+- The buzzer continuously sounds while dragging the volume slider, allowing users to perceive the current volume level in real time for intuitive feedback
+- Added buzzer beep alerts for password errors, account deletion, and unsaved file warnings to enhance interaction feedback
+- Added a file rename option in the file manager, allowing modification of existing file names
+
+#### Improved
+
+- Optimized UI prompt wording, uniformly correcting "息屏" to "熄屏" for more accurate display terminology
+- Removed duplicate NVS initialization in the Wi-Fi time sync module, now managed uniformly in the main entry to avoid redundant initialization
+
 ### v3.2
 
 #### Added

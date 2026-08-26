@@ -23,6 +23,7 @@ extern "C" {
 #include "screens/ui_Screen3.h"
 #include "screens/ui_Screen4.h"
 #include "screens/ui_Screen5.h"
+#include "screens/ui_Screen6.h"
 
 ///////////////////// VARIABLES ////////////////////
 
