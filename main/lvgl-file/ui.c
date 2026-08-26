@@ -94,10 +94,27 @@ void show_message_box(const char *title, const char *message) {
     static const char * btns[] = {"确定", ""};
     lv_obj_t * mbox = lv_msgbox_create(NULL, title, message, btns, true);
 
-    // 设置消息盒子使用的字体
-    lv_obj_set_style_text_font(mbox, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    // 1. 设置标题字体（自定义中文字体）
+    lv_obj_t * title_label = lv_msgbox_get_title(mbox);
+    if (title_label) {
+        lv_obj_set_style_text_font(title_label, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // 2. 设置消息内容字体（自定义中文字体）
+    lv_obj_t * text_label = lv_msgbox_get_text(mbox);
+    if (text_label) {
+        lv_obj_set_style_text_font(text_label, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // 3. 设置按钮矩阵字体（同样使用自定义中文字体，保证“确定”不乱码，同时若字体包含符号，关闭按钮也正常）
+    lv_obj_t * btns_obj = lv_msgbox_get_btns(mbox);
+    if (btns_obj) {
+        lv_obj_set_style_text_font(btns_obj, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    // 消息框居中
     lv_obj_center(mbox);
 
-    // 添加事件回调处理按钮点击
+    // 添加事件回调（点击按钮关闭）
     lv_obj_add_event_cb(mbox, msgbox_event_handler, LV_EVENT_CLICKED, NULL);
 }
