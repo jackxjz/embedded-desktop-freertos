@@ -7,6 +7,7 @@
 #include "waveshare_rgb_lcd_port.h"
 #include "ui.h"
 #include "wifi_sync.h"
+#include "buzzer.h"
 
 void app_main()
 {
@@ -33,6 +34,9 @@ void app_main()
 
     // 启动 WiFi 连接 + SNTP 时间同步(异步任务,后台自动连接和重连)
     wifi_sync_start();
+
+    // 初始化蜂鸣器 PWM(从 SPIFFS 读取上次保存的音量)
+    buzzer_init();
 
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe
