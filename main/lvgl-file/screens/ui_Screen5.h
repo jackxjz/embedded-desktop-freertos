@@ -19,6 +19,8 @@ extern lv_obj_t * ui_exitbtu3;
 extern lv_obj_t * ui_Label12;
 extern lv_obj_t * ui_label_cursor_size;
 extern lv_obj_t * ui_slider_cursor_size;
+extern lv_obj_t * ui_label_buzzer_volume;
+extern lv_obj_t * ui_slider_buzzer_volume;
 extern lv_obj_t * ui_label_screen_timeout;
 extern lv_obj_t * ui_dropdown_screen_timeout;
 // CUSTOM VARIABLES

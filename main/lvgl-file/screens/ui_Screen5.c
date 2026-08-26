@@ -8,14 +8,17 @@
 #include "../../nvs.h"
 #include "../../lvgl_port.h"
 #include "../../wifi_sync.h"
+#include "../../buzzer.h"
 
 lv_obj_t * ui_Screen5 = NULL;
 lv_obj_t * ui_exitbtu3 = NULL;
 lv_obj_t * ui_Label12 = NULL;
 lv_obj_t * ui_label_cursor_size = NULL;
 lv_obj_t * ui_slider_cursor_size = NULL;
-lv_obj_t * ui_label_screen_timeout = NULL;     // 熄屏时间标签
-lv_obj_t * ui_dropdown_screen_timeout = NULL;   // 熄屏时间下拉选择
+lv_obj_t * ui_label_buzzer_volume = NULL;        // 音量标签
+lv_obj_t * ui_slider_buzzer_volume = NULL;       // 音量滑块
+lv_obj_t * ui_label_screen_timeout = NULL;       // 熄屏时间标签
+lv_obj_t * ui_dropdown_screen_timeout = NULL;    // 熄屏时间下拉选择
 
 // 光标大小范围
 #define CURSOR_SIZE_MIN     8     // 最小光标尺寸(像素)
@@ -86,6 +89,23 @@ static void slider_cursor_size_released_cb(lv_event_t * e)
     int val = lv_slider_get_value(slider);
     int size = CURSOR_SIZE_MIN + (val * (CURSOR_SIZE_MAX - CURSOR_SIZE_MIN)) / 100;
     save_cursor_size(size);
+}
+
+// 音量 Slider 回调:拖动时实时更新蜂鸣器音量并鸣响反馈
+static void slider_buzzer_volume_cb(lv_event_t * e)
+{
+    lv_obj_t * slider = lv_event_get_target(e);
+    int val = lv_slider_get_value(slider);  // 0..100,直接对应音量
+    buzzer_set_volume(val);
+}
+
+// 音量 Slider 释放时保存到 SPIFFS 并短鸣一声反馈
+static void slider_buzzer_volume_released_cb(lv_event_t * e)
+{
+    lv_obj_t * slider = lv_event_get_target(e);
+    int val = lv_slider_get_value(slider);
+    buzzer_volume_save(val);
+    buzzer_beep();  // 释放后短鸣一声,让用户听到当前音量
 }
 
 // 熄屏时间 Dropdown 回调:选择后立即保存并应用
@@ -175,18 +195,41 @@ void ui_Screen5_screen_init(void)
     // 初始化时立即应用一次保存的光标大小(确保进入设置界面后光标尺寸与保存值一致)
     apply_cursor_size(saved_size);
 
-    // 第二行:熄屏时间(左边标签,右边 Dropdown)
+    // 第二行:音量大小(左边标签,右边 Slider)——放在光标大小与熄屏时间之间
+    ui_label_buzzer_volume = lv_label_create(ui_Screen5);
+    lv_obj_set_width(ui_label_buzzer_volume, LV_SIZE_CONTENT);
+    lv_obj_set_height(ui_label_buzzer_volume, LV_SIZE_CONTENT);
+    lv_obj_align(ui_label_buzzer_volume, LV_ALIGN_TOP_LEFT, 40, 160);
+    lv_label_set_text(ui_label_buzzer_volume, "音量大小");
+    lv_obj_set_style_text_font(ui_label_buzzer_volume, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // 音量 Slider(右边)
+    ui_slider_buzzer_volume = lv_slider_create(ui_Screen5);
+    lv_obj_set_width(ui_slider_buzzer_volume, 300);
+    lv_obj_align(ui_slider_buzzer_volume, LV_ALIGN_TOP_LEFT, 200, 168);
+    lv_slider_set_range(ui_slider_buzzer_volume, BUZZER_VOLUME_MIN, BUZZER_VOLUME_MAX);
+    lv_slider_set_mode(ui_slider_buzzer_volume, LV_SLIDER_MODE_NORMAL);
+
+    // 从 SPIFFS 读取上次保存的音量,设置 Slider 初始值
+    int saved_volume = buzzer_volume_load();
+    lv_slider_set_value(ui_slider_buzzer_volume, saved_volume, LV_ANIM_OFF);
+
+    // 注册音量 Slider 事件:拖动时实时更新音量,释放时保存并鸣响反馈
+    lv_obj_add_event_cb(ui_slider_buzzer_volume, slider_buzzer_volume_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(ui_slider_buzzer_volume, slider_buzzer_volume_released_cb, LV_EVENT_RELEASED, NULL);
+
+    // 第三行:熄屏时间(左边标签,右边 Dropdown)——下移到音量行下方
     ui_label_screen_timeout = lv_label_create(ui_Screen5);
     lv_obj_set_width(ui_label_screen_timeout, LV_SIZE_CONTENT);
     lv_obj_set_height(ui_label_screen_timeout, LV_SIZE_CONTENT);
-    lv_obj_align(ui_label_screen_timeout, LV_ALIGN_TOP_LEFT, 40, 180);
+    lv_obj_align(ui_label_screen_timeout, LV_ALIGN_TOP_LEFT, 40, 220);
     lv_label_set_text(ui_label_screen_timeout, "熄屏时间");
     lv_obj_set_style_text_font(ui_label_screen_timeout, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // 熄屏时间 Dropdown(右边)
     ui_dropdown_screen_timeout = lv_dropdown_create(ui_Screen5);
     lv_obj_set_width(ui_dropdown_screen_timeout, 150);
-    lv_obj_align(ui_dropdown_screen_timeout, LV_ALIGN_TOP_LEFT, 200, 170);
+    lv_obj_align(ui_dropdown_screen_timeout, LV_ALIGN_TOP_LEFT, 200, 210);
     lv_dropdown_set_options(ui_dropdown_screen_timeout, "10\n20\n30");
     lv_obj_set_style_text_font(ui_dropdown_screen_timeout, &ui_font_Font1, LV_PART_ITEMS);
 
@@ -216,6 +259,8 @@ void ui_Screen5_screen_destroy(void)
     ui_Label12 = NULL;
     ui_label_cursor_size = NULL;
     ui_slider_cursor_size = NULL;
+    ui_label_buzzer_volume = NULL;
+    ui_slider_buzzer_volume = NULL;
     ui_label_screen_timeout = NULL;
     ui_dropdown_screen_timeout = NULL;
 }
