@@ -6,13 +6,14 @@
 
 #include "waveshare_rgb_lcd_port.h"
 #include "ui.h"
+#include "wifi_sync.h"
 
 void app_main()
 {
-    waveshare_esp32_s3_rgb_lcd_init(); // Initialize the Waveshare ESP32-S3 RGB LCD 
-    // wavesahre_rgb_lcd_bl_on();  //Turn on the screen backlight 
-    // wavesahre_rgb_lcd_bl_off(); //Turn off the screen backlight 
-    
+    waveshare_esp32_s3_rgb_lcd_init(); // Initialize the Waveshare ESP32-S3 RGB LCD
+    // wavesahre_rgb_lcd_bl_on();  //Turn on the screen backlight
+    // wavesahre_rgb_lcd_bl_off(); //Turn off the screen backlight
+
     // 初始化 SPIFFS
     esp_err_t ret = init_spiffs();
     if (ret != ESP_OK) {
@@ -25,8 +26,13 @@ void app_main()
         // NVS分区被截断，需要擦除并重试
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
-    } 
+    }
     ESP_ERROR_CHECK(err);
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // 启动 WiFi 连接 + SNTP 时间同步(异步任务,后台自动连接和重连)
+    wifi_sync_start();
 
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe
