@@ -7,13 +7,19 @@
 #include "../../spiffs.h"
 #include "../../nvs.h"
 #include "../../lvgl_port.h"
+#include "../../wifi_sync.h"
 #include <stdio.h>      //【新增】用于文件操作
 #include <stdlib.h>     //【新增】用于 atoi
 #include <string.h>     //【新增】
+#include <time.h>       //【新增】用于获取本地时间
 
 lv_obj_t * ui_Screen3 = NULL;
 lv_obj_t * ui_exitbtu1 = NULL;
 lv_obj_t * ui_Label4 = NULL;
+lv_obj_t * ui_screen_off_btn = NULL;          // 主动熄屏按钮
+lv_obj_t * ui_time_label = NULL;           // 桌面右上角时间显示（大字体）
+lv_obj_t * ui_date_label = NULL;           // 桌面右上角日期显示（小字体）
+static lv_timer_t * time_refresh_timer = NULL;  // 时间刷新定时器
 
 // 桌面相关对象
 lv_obj_t * ui_file_container = NULL;          // 文件图标容器(从左上角排列,不可滚动)
@@ -25,7 +31,7 @@ static lv_obj_t * ui_settings_icon = NULL;    // 设置图标(放在容器中)
 static bool settings_icon_selected = false;   // 设置图标是否被选中
 #define SETTINGS_ICON_NAME "__settings__"     // 设置图标特殊名称
 
-// 【新增】桌面长按滑动检测变量
+// 桌面长按滑动检测变量
 static bool desktop_press_moved = false;
 static lv_coord_t desktop_press_start_x = 0;
 static lv_coord_t desktop_press_start_y = 0;
@@ -168,6 +174,15 @@ void ui_event_exitbtu1(lv_event_t * e)
     }
 }
 
+// 熄屏按钮点击事件
+static void ui_event_screen_off(lv_event_t * e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        lvgl_port_force_screen_off();
+    }
+}
+
 // 初始化选中样式(只初始化一次)
 static void init_icon_style(void)
 {
@@ -307,9 +322,9 @@ static void refresh_file_icons(void)
 {
     if (ui_file_container == NULL) return;
 
-    // 清除所有现有图标并释放其 user_data，但跳过设置图标
-    uint32_t cnt = lv_obj_get_child_cnt(ui_file_container);
-    for (uint32_t i = 0; i < cnt; i++) {
+    // 【修复】从后往前遍历删除，避免索引错乱
+    int32_t cnt = lv_obj_get_child_cnt(ui_file_container);
+    for (int32_t i = cnt - 1; i >= 0; i--) {
         lv_obj_t * child = lv_obj_get_child(ui_file_container, i);
         const char * name = (const char *)lv_obj_get_user_data(child);
         if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
@@ -318,21 +333,20 @@ static void refresh_file_icons(void)
         free_icon_user_data(child);
         lv_obj_del(child);
     }
-    // 由于删除了元素，重新获取容器中的子对象数量（但设置图标保留，其他被删）
-    // 重新加载文件图标（不包含设置图标）
-    selected_file_icon = NULL;         // 重置选中状态
+
+    // 重置选中状态
+    selected_file_icon = NULL;
     dragging_icon = NULL;
     drag_in_progress = false;
     long_press_handled = false;
     desktop_press_moved = false;
 
-    // 【新增】加载保存的图标坐标
+    // 加载保存的图标坐标
     load_icon_positions();
 
-    // 从 SPIFFS 加载文件名
+    // 从 SPIFFS 加载文件名并重新创建图标
     char names[USER_FILE_MAX_COUNT][USER_FILE_NAME_MAX];
     int n = get_user_file_list(names, USER_FILE_MAX_COUNT);
-
     for (int i = 0; i < n; i++) {
         create_file_icon(names[i], i);
     }
@@ -923,7 +937,7 @@ static void openfile_close_cb(lv_event_t * e)
     if (openfile_dirty) {
         // 有未保存的修改,弹出确认框
         static const char * btns[] = {"不保存", "取消", ""};
-        lv_obj_t * mbox = lv_msgbox_create(NULL, "提示", "文件未保存,是否放弃修改?", btns, true);
+        lv_obj_t * mbox = lv_msgbox_create(NULL, "提示", "文件未保存,是否放弃修改?", btns, false);
         lv_obj_set_style_text_font(mbox, &ui_font_Font1, LV_PART_MAIN);
         lv_obj_center(mbox);
         lv_obj_add_event_cb(mbox, unsaved_msgbox_cb, LV_EVENT_CLICKED, NULL);
@@ -1055,13 +1069,36 @@ static void show_delete_confirm(const char *name)
     static const char * btns[] = {"删除", "取消", ""};
     char msg[80] = {0};
     snprintf(msg, sizeof(msg), "确定删除文件: %s ?", name);
-    delete_msgbox = lv_msgbox_create(NULL, "删除文件", msg, btns, true);
+    delete_msgbox = lv_msgbox_create(NULL, "删除文件", msg, btns, false);
     lv_obj_set_style_text_font(delete_msgbox, &ui_font_Font1, LV_PART_MAIN);
     lv_obj_center(delete_msgbox);
     lv_obj_add_event_cb(delete_msgbox, delete_msgbox_cb, LV_EVENT_CLICKED, NULL);
 }
 
 // build funtions
+
+// 时间刷新定时器回调:每秒更新桌面右上角的日期和时间
+static void time_refresh_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (ui_date_label == NULL || ui_time_label == NULL) return;
+
+    // 获取当前本地时间
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    // 格式化日期: YYYY-MM-DD
+    char date_buf[16] = {0};
+    strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &timeinfo);
+
+    // 格式化时间: HH:MM:SS
+    char time_buf[16] = {0};
+    strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &timeinfo);
+
+    lv_label_set_text(ui_date_label, date_buf);
+    lv_label_set_text(ui_time_label, time_buf);
+}
 
 void ui_Screen3_screen_init(void)
 {
@@ -1087,7 +1124,7 @@ void ui_Screen3_screen_init(void)
     lv_obj_set_style_border_width(ui_file_container, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(ui_file_container, 0, LV_PART_MAIN);
 
-    //【新增】注册桌面按下、移动回调，用于检测滑动
+    // 注册桌面按下、移动回调，用于检测滑动
     lv_obj_add_event_cb(ui_file_container, desktop_pressed_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ui_file_container, desktop_pressing_cb, LV_EVENT_PRESSING, NULL);
     // 在容器上注册长按事件(用作"鼠标右键"弹出右键菜单)
@@ -1183,7 +1220,51 @@ void ui_Screen3_screen_init(void)
     lv_obj_add_event_cb(ui_exitbtu1, ui_event_exitbtu1, LV_EVENT_ALL, NULL);
 
     //====================
-    // 4.键盘放在lv_layer_top()，保持原有逻辑不变
+    // 3.5 熄屏按钮（退出按钮左侧）
+    //====================
+    ui_screen_off_btn = lv_btn_create(ui_Screen3);
+    lv_obj_set_width(ui_screen_off_btn, 80);
+    lv_obj_set_height(ui_screen_off_btn, 40);
+    // 定位在退出按钮左侧，间距 10 像素
+    // 退出按钮对齐为 LV_ALIGN_TOP_RIGHT, -12, 12，宽80，其左边缘 x = 800 - 12 - 80 = 708（假设屏幕宽800）
+    // 我们使用相对定位：先将退出按钮的坐标计算出来，然后向左偏移 90（80+10）
+    lv_obj_align_to(ui_screen_off_btn, ui_exitbtu1, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    lv_obj_add_flag(ui_screen_off_btn, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_clear_flag(ui_screen_off_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(ui_screen_off_btn, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_screen_off_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // 按钮标签
+    lv_obj_t * off_label = lv_label_create(ui_screen_off_btn);
+    lv_label_set_text(off_label, "熄屏");
+    lv_obj_set_style_text_font(off_label, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(off_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(off_label);
+
+    lv_obj_add_event_cb(ui_screen_off_btn, ui_event_screen_off, LV_EVENT_ALL, NULL);
+
+    //====================
+    // 4. 日期和时间显示（右上角，退出按钮下方）
+    //====================
+    // 日期标签（小字体）
+    ui_date_label = lv_label_create(ui_Screen3);
+    lv_label_set_text(ui_date_label, "----/--/--");
+    lv_obj_set_style_text_font(ui_date_label, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(ui_date_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(ui_date_label, LV_ALIGN_CENTER, 300, -150); // 调整Y位置
+
+    // 时间标签（大字体）
+    ui_time_label = lv_label_create(ui_Screen3);
+    lv_label_set_text(ui_time_label, "--:--:--");
+    lv_obj_set_style_text_font(ui_time_label, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(ui_time_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(ui_time_label, LV_ALIGN_CENTER, 300, -120); // 日期下方
+
+    // 创建时间刷新定时器(每 1 秒更新一次)
+    time_refresh_timer = lv_timer_create(time_refresh_timer_cb, 1000, NULL);
+
+    //====================
+    // 5.键盘放在lv_layer_top()，保持原有逻辑不变
     //====================
     // 创建桌面键盘(初始隐藏)
     ui_desktop_kb = lv_keyboard_create(lv_layer_top());
@@ -1214,7 +1295,11 @@ void ui_Screen3_screen_destroy(void)
     // NULL screen variables
     ui_Screen3 = NULL;
     ui_exitbtu1 = NULL;
+    ui_screen_off_btn = NULL;
     ui_Label4 = NULL;
+    ui_date_label = NULL;
+    ui_time_label = NULL;
+    time_refresh_timer = NULL;
     ui_file_container = NULL;
     ui_desktop_kb = NULL;
     ui_settings_icon = NULL;

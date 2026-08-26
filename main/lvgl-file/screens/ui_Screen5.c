@@ -7,12 +7,15 @@
 #include "../../spiffs.h"
 #include "../../nvs.h"
 #include "../../lvgl_port.h"
+#include "../../wifi_sync.h"
 
 lv_obj_t * ui_Screen5 = NULL;
 lv_obj_t * ui_exitbtu3 = NULL;
 lv_obj_t * ui_Label12 = NULL;
 lv_obj_t * ui_label_cursor_size = NULL;
 lv_obj_t * ui_slider_cursor_size = NULL;
+lv_obj_t * ui_label_screen_timeout = NULL;     // 熄屏时间标签
+lv_obj_t * ui_dropdown_screen_timeout = NULL;   // 熄屏时间下拉选择
 
 // 光标大小范围
 #define CURSOR_SIZE_MIN     8     // 最小光标尺寸(像素)
@@ -83,6 +86,20 @@ static void slider_cursor_size_released_cb(lv_event_t * e)
     int val = lv_slider_get_value(slider);
     int size = CURSOR_SIZE_MIN + (val * (CURSOR_SIZE_MAX - CURSOR_SIZE_MIN)) / 100;
     save_cursor_size(size);
+}
+
+// 熄屏时间 Dropdown 回调:选择后立即保存并应用
+static void dropdown_screen_timeout_cb(lv_event_t * e)
+{
+    lv_obj_t * dd = lv_event_get_target(e);
+    // 获取当前选中项的值(10/20/30)
+    char buf[8] = {0};
+    lv_dropdown_get_selected_str(dd, buf, sizeof(buf));
+    int seconds = atoi(buf);
+    // 保存到 SPIFFS
+    screen_timeout_save(seconds);
+    // 立即应用到 lvgl_port 的熄屏定时器
+    lvgl_port_set_screen_timeout(seconds);
 }
 
 // 退出按钮事件:返回桌面(界面3)
@@ -157,6 +174,35 @@ void ui_Screen5_screen_init(void)
 
     // 初始化时立即应用一次保存的光标大小(确保进入设置界面后光标尺寸与保存值一致)
     apply_cursor_size(saved_size);
+
+    // 第二行:熄屏时间(左边标签,右边 Dropdown)
+    ui_label_screen_timeout = lv_label_create(ui_Screen5);
+    lv_obj_set_width(ui_label_screen_timeout, LV_SIZE_CONTENT);
+    lv_obj_set_height(ui_label_screen_timeout, LV_SIZE_CONTENT);
+    lv_obj_align(ui_label_screen_timeout, LV_ALIGN_TOP_LEFT, 40, 180);
+    lv_label_set_text(ui_label_screen_timeout, "熄屏时间");
+    lv_obj_set_style_text_font(ui_label_screen_timeout, &ui_font_Font1, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // 熄屏时间 Dropdown(右边)
+    ui_dropdown_screen_timeout = lv_dropdown_create(ui_Screen5);
+    lv_obj_set_width(ui_dropdown_screen_timeout, 150);
+    lv_obj_align(ui_dropdown_screen_timeout, LV_ALIGN_TOP_LEFT, 200, 170);
+    lv_dropdown_set_options(ui_dropdown_screen_timeout, "10\n20\n30");
+    lv_obj_set_style_text_font(ui_dropdown_screen_timeout, &ui_font_Font1, LV_PART_ITEMS);
+
+    // 从 SPIFFS 读取上次保存的熄屏时间,设置 Dropdown 初始选中项
+    int saved_timeout = screen_timeout_load();
+    int sel_idx = 0;  // 默认选第一项(10s)
+    if (saved_timeout == 10) sel_idx = 0;
+    else if (saved_timeout == 20) sel_idx = 1;
+    else if (saved_timeout == 30) sel_idx = 2;
+    lv_dropdown_set_selected(ui_dropdown_screen_timeout, sel_idx);
+
+    // 初始化界面时，把读取出来的超时直接应用到底层
+    lvgl_port_set_screen_timeout(saved_timeout);
+
+    // 注册 Dropdown 事件:选择后保存并应用
+    lv_obj_add_event_cb(ui_dropdown_screen_timeout, dropdown_screen_timeout_cb, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
 // 销毁设置界面
@@ -170,4 +216,6 @@ void ui_Screen5_screen_destroy(void)
     ui_Label12 = NULL;
     ui_label_cursor_size = NULL;
     ui_slider_cursor_size = NULL;
+    ui_label_screen_timeout = NULL;
+    ui_dropdown_screen_timeout = NULL;
 }

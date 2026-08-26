@@ -157,6 +157,22 @@ void lvgl_port_unlock(void);
  */
 bool lvgl_port_notify_rgb_vsync(void);
 
+/**
+ * @brief 设置息屏超时时间(秒)
+ *        供设置界面调用,设置后立即生效
+ */
+void lvgl_port_set_screen_timeout(int seconds);
+
+/**
+ * @brief 获取当前息屏超时时间(秒)
+ */
+int lvgl_port_get_screen_timeout(void);
+
+/**
+ * @brief 强制关闭屏幕背光（主动熄屏）
+ */
+void lvgl_port_force_screen_off(void);
+
 #ifdef __cplusplus
 }
 #endif

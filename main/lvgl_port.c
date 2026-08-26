@@ -17,6 +17,7 @@
 #include "lvgl.h"
 #include "lvgl_port.h"
 #include "waveshare_rgb_lcd_port.h"   // 新增：背光开关控制
+#include "wifi_sync.h"                 // 新增：息屏时间配置读写
 
 static const char *TAG_LVGL = "lv_port";                      // 日志输出标签
 static SemaphoreHandle_t lvgl_mux;                       // LVGL互斥锁（保证线程安全，因LVGL API非线程安全）
@@ -27,6 +28,7 @@ lv_indev_t *g_lvgl_indev = NULL;                         // 全局触摸输入�
 // 【新增】息屏亮屏相关
 static uint32_t last_touch_time_ms = 0;   // 最后触摸时间戳(ms)
 static bool screen_is_on = true;          // 当前屏幕是否亮屏
+static uint32_t screen_timeout_ms = 10000;  // 息屏超时时间(默认10秒,可由设置界面修改)
 
 /* -------------------------- 屏幕旋转相关函数 -------------------------- */
 #if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0  // 如果配置了屏幕旋转（非0度），编译以下代码
@@ -557,11 +559,23 @@ static void screen_timeout_timer_cb(lv_timer_t *timer)
     if (!screen_is_on) return;  // 已经息屏了，不再处理
 
     uint32_t idle_time = lv_tick_get() - last_touch_time_ms;
-    if (idle_time >= 10000) {   // 10秒 = 10000ms
-        ESP_LOGI(TAG_LVGL, "10秒无触摸，自动息屏");
+    if (idle_time >= screen_timeout_ms) {   // 超过配置的息屏时间
+        ESP_LOGI(TAG_LVGL, "%lu 秒无触摸，自动息屏", (unsigned long)(screen_timeout_ms / 1000));
         wavesahre_rgb_lcd_bl_off();
         screen_is_on = false;
     }
+}
+
+// 设置息屏超时时间(秒),供设置界面调用
+void lvgl_port_set_screen_timeout(int seconds)
+{
+    screen_timeout_ms = seconds * 1000;
+}
+
+// 获取当前息屏超时时间(秒)
+int lvgl_port_get_screen_timeout(void)
+{
+    return (int)(screen_timeout_ms / 1000);
 }
 
 /**
@@ -699,6 +713,11 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
     last_touch_time_ms = lv_tick_get();
     lv_timer_create(screen_timeout_timer_cb, 500, NULL);
 
+    // 从 SPIFFS 加载息屏时间配置
+    int timeout_sec = screen_timeout_load();
+    screen_timeout_ms = timeout_sec * 1000;
+    ESP_LOGI(TAG_LVGL, "息屏时间: %d 秒", timeout_sec);
+
     return ESP_OK;
 }
 
@@ -741,3 +760,11 @@ bool lvgl_port_notify_rgb_vsync(void)
     return (need_yield == pdTRUE); // Return whether a yield is needed
 }
 
+void lvgl_port_force_screen_off(void)
+{
+    if (screen_is_on) {
+        wavesahre_rgb_lcd_bl_off();
+        screen_is_on = false;
+        ESP_LOGI(TAG_LVGL, "主动熄屏");
+    }
+}
