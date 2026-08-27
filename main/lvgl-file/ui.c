@@ -82,11 +82,8 @@ void ui_destroy(void)
 
 // 消息框事件处理函数
 static void msgbox_event_handler(lv_event_t * e) {
-    // 获取按钮矩阵对象
-    lv_obj_t * btnm = lv_event_get_target(e);
-    
-    // 通过按钮矩阵获取消息框对象
-    lv_obj_t * msgbox = lv_obj_get_parent(btnm);
+    // current_target 才是注册回调的消息框对象本身
+    lv_obj_t * msgbox = lv_event_get_current_target(e);
     
     // 关闭消息框
     lv_msgbox_close(msgbox);

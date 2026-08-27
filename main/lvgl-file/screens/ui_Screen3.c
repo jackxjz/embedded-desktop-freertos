@@ -1161,16 +1161,16 @@ static void openfile_do_close(void)
 // 未保存确认消息框按钮回调
 static void unsaved_msgbox_cb(lv_event_t * e)
 {
-    lv_obj_t * btnm = lv_event_get_target(e);
-    lv_obj_t * mbox = lv_obj_get_parent(btnm);
+    // 【关键修复】current_target 才是注册回调的消息框对象本身
+    // 不要用 lv_obj_get_parent(lv_event_get_target(e))，那会拿到 content 容器
+    lv_obj_t * mbox = lv_event_get_current_target(e);
     const char * btn_text = lv_msgbox_get_active_btn_text(mbox);
 
     if (btn_text && strcmp(btn_text, "不保存") == 0) {
-        // 用户确认放弃修改,直接关闭
         lv_msgbox_close(mbox);
         openfile_do_close();
     } else {
-        // 取消:用户回去继续编辑
+        // 取消：只关闭消息框，保留编辑状态
         lv_msgbox_close(mbox);
     }
 }
