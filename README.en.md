@@ -14,17 +14,17 @@ This project is the work for the **2026 Electronic Technology Association Embedd
 
 ![ESP32-S3-Touch-LCD-7 Onboard Resources](https://docs.waveshare.net/assets/images/ESP32-S3-Touch-LCD-7-Intro1-1354f76103c5429920a42f7a5ca1dc7d.webp)
 
-| Item           | Specifications                                                       |
-| -------------- | -------------------------------------------------------------------- |
-| Model          | ESP32-S3-Touch-LCD-7                                                 |
-| Manufacturer   | Waveshare                                                            |
-| Processor      | High-performance Xtensa 32-bit LX7 dual-core processor, up to 240 MHz |
+| Item           | Specifications                                                              |
+| -------------- | --------------------------------------------------------------------------- |
+| Model          | ESP32-S3-Touch-LCD-7                                                        |
+| Manufacturer   | Waveshare                                                                   |
+| Processor      | High-performance Xtensa 32-bit LX7 dual-core processor, up to 240 MHz       |
 | Wireless       | Supports 2.4 GHz Wi-Fi (802.11 b/g/n) and Bluetooth 5 (LE), onboard antenna |
-| Flash          | 8 MB                                                                 |
-| PSRAM          | 8 MB                                                                 |
-| Display        | 7-inch capacitive touch screen                                       |
-| Peripheral I/O | CAN, RS485, I²C, USB, etc.                                           |
-| Development    | ESP-IDF                                                              |
+| Flash          | 8 MB                                                                        |
+| PSRAM          | 8 MB                                                                        |
+| Display        | 7-inch capacitive touch screen                                              |
+| Peripheral I/O | CAN, RS485, I²C, USB, etc.                                                  |
+| Development    | ESP-IDF                                                                     |
 
 [Schematic](https://files.waveshare.net/wiki/ESP32-S3-Touch-LCD-7/ESP32-S3-Touch-LCD-7-Sch.pdf) | [ESP32-S3-Touch-LCD-7 Drawings](https://www.waveshare.net/wiki/%E6%96%87%E4%BB%B6:ESP32-S3-Touch-LCD-7.zip)
 
@@ -49,6 +49,30 @@ This project is the work for the **2026 Electronic Technology Association Embedd
 ## Development Log
 
 All software changes are recorded here.
+
+### v4.2
+
+#### Improved
+
+- Fixed dangling pointer issue in account management: reset selected state on list reload to prevent crashes from operating on destroyed objects
+- Account list now stores account names via `user_data` instead of parsing button text, improving data access stability
+- Properly free `user_data` dynamic memory when clearing or destroying the account list, eliminating memory leak risks
+- Fixed message box object retrieval in file editor: use `lv_event_get_current_target()` instead of `lv_obj_get_parent()` to prevent invalid memory access and system reboot when closing unsaved files
+- Fixed inconsistent remember password state: synchronize `is_remeber` flag after successful login to ensure UI state matches NVS stored credentials
+
+### v4.1
+
+#### Added
+
+- Drawing app now detects unsaved changes on exit and prompts for confirmation, preventing accidental data loss
+- Added buzzer feedback when closing unsaved files
+
+#### Improved
+
+- Drawing storage format upgraded from text to binary, with magic number (`DRAW`) and dimension validation in file header for improved data integrity and parsing speed
+- 8KB batch buffer for Flash writes, reducing write cycles and extending Flash lifespan
+- Auto-clear saved credentials from NVS when "Remember Password" is unchecked, preventing credential residue
+- Adjusted Wi-Fi configuration structure for optimized connection parameter management
 
 ### v4.0
 
@@ -192,3 +216,43 @@ All software changes are recorded here.
 ---
 
 ## Troubleshooting
+
+### Screen Flickering When Saving Drawing
+
+**Phenomenon**: When clicking the save button in the drawing app, the screen flickers noticeably; the more pixels drawn, the more severe and longer the flickering lasts.
+
+**Cause Analysis**:
+
+1. **Main thread blocking**: The `drawing_save()` function executes the save logic directly in the LVGL main thread (event callback), iterating over 480×320 = 153,600 pixels and calling `fprintf` for every non‑white pixel. When the drawing contains many pixels (tens of thousands), tens of thousands of file system calls can block the main thread for hundreds of milliseconds or even seconds.
+2. **Flash write overhead**: Writing to SPIFFS may trigger cache misses, further increasing CPU stalls; at the same time, LVGL refresh depends on VSYNC or timers. Blocking the main thread interrupts the refresh, and the catch‑up refresh after the block causes visual flickering.
+
+**Solutions**:
+
+- Move the save operation to a **FreeRTOS background task** to avoid blocking the LVGL main thread. The dual‑core ESP32‑S3 can handle UI rendering and file writing separately.
+- Use an **8 KB memory buffer for batch writing**; write to Flash only when the buffer is full using `fwrite`, greatly reducing the number of system calls.
+- Show a "Saving…" overlay during the save process to prevent user interaction; after saving completes, safely call back to the UI via `lvgl_port_lock` to display the result.
+- (Optional) Adopt a **binary storage format** (6 bytes per pixel, containing x/y coordinates and colour value), reducing data size to about one‑third of the text format for faster writing.
+
+### Crashes Related to File Manager
+
+- **Crash when refreshing account list**: The selected state was not reset during list refresh, leading to dangling pointer access when operating on destroyed objects. Fix: reset the selected state upon refresh (see v4.2 improvements).
+- **Crash when closing file editor**: In the message box callback, using `lv_obj_get_parent()` incorrectly retrieved the object hierarchy, causing access to an invalid address. Fix: use `lv_event_get_current_target()` to get the current event target (see v4.2 improvements).
+- **Memory leak**: The `user_data` dynamic memory was not released when clearing or destroying the account list. Fix: properly free `user_data` (see v4.2 improvements).
+
+### Inconsistent "Remember Password" State
+
+**Phenomenon**: The checkbox state of "Remember Password" on the login page does not match the credentials actually stored in NVS.
+
+**Cause and Fix**: The `is_remeber` state variable was not updated after successful login, causing inconsistency between the page state and stored data. Fix: synchronise the state variable after login (see v4.2 improvements). Additionally, when unchecking "Remember Password", the saved credentials in NVS are automatically cleared (see v4.1 improvements).
+
+### System Settings Not Taking Effect
+
+**Phenomenon**: After modifying settings such as cursor size or screen‑off timeout, the configuration is lost after reboot or the changes do not take effect immediately.
+
+**Cause and Fix**: Parameters were not persisted to NVS, or the relevant modules were not notified to refresh after changes. Fix: unify the NVS read/write interface; write parameters to NVS immediately upon change and broadcast refresh events (see v3.1 and v3.0 improvements).
+
+### Network Time Synchronisation Failure
+
+**Phenomenon**: Time is not synchronised after Wi‑Fi connects successfully, or time is not updated after reconnection.
+
+**Cause and Fix**: The desktop status bar time display was not refreshed after NTP synchronisation; also, automatic re‑synchronisation was not triggered after reconnection. Fix: actively refresh the display after synchronisation; implement automatic reconnection and auto‑synchronisation upon reconnection (see v3.1 improvements).
