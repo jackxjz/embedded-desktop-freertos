@@ -232,10 +232,13 @@ void ui_event_tongyi(lv_event_t * e)
 void ui_event_jizhu(lv_event_t * e)
 {
     lv_event_code_t event_code = lv_event_get_code(e);
-
-    if(event_code == LV_EVENT_VALUE_CHANGED)
-    {
+    if(event_code == LV_EVENT_VALUE_CHANGED) {
         is_remeber = lv_obj_has_state(ui_jizhu, LV_STATE_CHECKED);
+        if (!is_remeber) {
+            // 取消记住时删除 NVS 中的账号密码
+            delete_save_account("acc");
+            delete_save_account("pwd");
+        }
     }
 }
 

@@ -10,8 +10,8 @@ extern "C" {
 #endif
 
 // WiFi 热点配置(用户指定)
-#define WIFI_SSID           "Magic6"
-#define WIFI_PASSWORD       "3204674541"
+#define WIFI_SSID           "JACK"
+#define WIFI_PASSWORD       "12345678"
 
 // 息屏时间范围(秒)
 #define SCREEN_TIMEOUT_MIN      10
