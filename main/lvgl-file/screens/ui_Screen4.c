@@ -7,6 +7,8 @@
 #include "../../spiffs.h"
 #include "../../nvs.h"
 #include "../../buzzer.h"          // 蜂鸣器驱动
+#include <stdlib.h>
+#include <string.h>
 
 lv_obj_t * ui_Screen4 = NULL;
 lv_obj_t * ui_exitbtu2 = NULL;
@@ -28,12 +30,20 @@ void init_selected_style() {
     lv_style_set_text_color(&style_selected, lv_color_hex(0xffffff));  // 白色文字
 }
 
-// 列表项点击事件处理
+// 列表项点击事件处理（使用 user_data 获取账号名）
 void list_item_click_event(lv_event_t * e) {
     lv_obj_t * item = lv_event_get_target(e);
+    const char * acc = (const char *)lv_obj_get_user_data(item);
+    if (!acc) {
+        // 若 user_data 为空，回退到按钮文本（但不应发生）
+        acc = lv_list_get_btn_text(ui_AccountList, item);
+        if (!acc) return;
+    }
     
-    // 清除之前选中项的样式
+    // 清除之前选中项的样式（先确保对象有效）
     if (selected_item) {
+        // 安全起见，检查 selected_item 是否仍然在列表中（尝试获取其父对象）
+        // 但更可靠的方法是在列表刷新时重置 selected_item
         lv_obj_remove_style(selected_item, &style_selected, LV_PART_MAIN);
     }
     
@@ -41,12 +51,9 @@ void list_item_click_event(lv_event_t * e) {
     selected_item = item;
     lv_obj_add_style(item, &style_selected, LV_PART_MAIN);
     
-    // 提取选中的账号
-    const char * item_text = lv_list_get_btn_text(ui_AccountList, item);
-    if (item_text) {
-        strncpy(selected_account, item_text, strcspn(item_text, ","));
-        selected_account[strcspn(item_text, ",")] = '\0';
-    }
+    // 安全拷贝账号名
+    strncpy(selected_account, acc, MAX_ACCOUNT_LENGTH - 1);
+    selected_account[MAX_ACCOUNT_LENGTH - 1] = '\0';
 }
 
 // 直接删除账号（无确认对话框）
@@ -60,7 +67,7 @@ void delete_btn_click_event(lv_event_t * e) {
     delete_account_from_file(selected_account);
     load_accounts_to_list();
     
-    // 重置选中状态
+    // 重置选中状态（load_accounts_to_list 中已重置，此处可省略）
     selected_item = NULL;
     selected_account[0] = '\0';
     
@@ -72,8 +79,22 @@ void delete_btn_click_event(lv_event_t * e) {
 
 // 从文件加载账号到列表
 void load_accounts_to_list() {
+    // ---- 关键修复：重置选中状态，避免野指针 ----
+    selected_item = NULL;
+    selected_account[0] = '\0';
+
     // 清空列表
     if (ui_AccountList) {
+        // 先释放所有按钮的 user_data
+        uint32_t cnt = lv_obj_get_child_cnt(ui_AccountList);
+        for (uint32_t i = 0; i < cnt; i++) {
+            lv_obj_t * child = lv_obj_get_child(ui_AccountList, i);
+            void * data = lv_obj_get_user_data(child);
+            if (data) {
+                lv_mem_free(data);
+                lv_obj_set_user_data(child, NULL);
+            }
+        }
         lv_obj_clean(ui_AccountList);
     }
     
@@ -93,6 +114,12 @@ void load_accounts_to_list() {
         
         // 添加到列表
         lv_obj_t * item = lv_list_add_btn(ui_AccountList, NULL, line);
+        // 复制账号名到 user_data（便于安全获取）
+        char *acc_copy = (char *)lv_mem_alloc(strlen(line) + 1);
+        if (acc_copy) {
+            strcpy(acc_copy, line);
+            lv_obj_set_user_data(item, acc_copy);
+        }
         lv_obj_add_event_cb(item, list_item_click_event, LV_EVENT_CLICKED, NULL);
     }
     
@@ -228,6 +255,19 @@ void ui_Screen4_screen_init(void) {
 void ui_Screen4_screen_destroy(void) {
     if(ui_Screen4) lv_obj_del(ui_Screen4);
 
+    // 清理列表项 user_data（在删除对象前释放）
+    if (ui_AccountList) {
+        uint32_t cnt = lv_obj_get_child_cnt(ui_AccountList);
+        for (uint32_t i = 0; i < cnt; i++) {
+            lv_obj_t * child = lv_obj_get_child(ui_AccountList, i);
+            void * data = lv_obj_get_user_data(child);
+            if (data) {
+                lv_mem_free(data);
+                lv_obj_set_user_data(child, NULL);
+            }
+        }
+    }
+
     // NULL screen variables
     ui_Screen4 = NULL;
     ui_exitbtu2 = NULL;
@@ -237,4 +277,5 @@ void ui_Screen4_screen_destroy(void) {
     ui_Label11 = NULL;
     ui_AccountList = NULL;
     selected_item = NULL;
+    selected_account[0] = '\0';
 }
