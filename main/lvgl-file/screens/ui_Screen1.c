@@ -373,6 +373,7 @@ void ui_Screen1_screen_init(void)
             lv_textarea_set_text(ui_zhanghao, account);
             lv_textarea_set_text(ui_mima, password);
             lv_obj_add_state(ui_jizhu, LV_STATE_CHECKED); 
+            is_remeber = true;
         }
     }
 
