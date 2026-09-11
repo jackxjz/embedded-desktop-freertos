@@ -304,50 +304,6 @@ The following changes cannot be precisely versioned:
 
 ## Troubleshooting
 
-### Screen Flicker When Saving in Drawing App
-
-**Symptom**: When clicking the save button in the drawing app, the screen flickers noticeably; the more pixels drawn, the more severe and longer the flicker.
-
-**Cause analysis**:
-
-1. **Main thread blocking**: The `drawing_save()` function directly executes save logic in the LVGL main thread (event callback), iterating over 480×320 = 153,600 pixels and calling `fprintf` once for each non-white pixel. When there is a lot of drawing content (tens of thousands of pixels), tens of thousands of filesystem calls block the main thread for hundreds of milliseconds or even seconds.
-2. **Flash write overhead**: SPIFFS writing to Flash may trigger cache misses, further aggravating CPU stalls; meanwhile, LVGL refresh depends on VSYNC or timers. Main thread blocking interrupts refresh, and catch-up refresh after the block produces visual flicker.
-
-**Solution**:
-
-- Move the save operation to a **FreeRTOS background task** to avoid blocking the LVGL main thread. The ESP32-S3 dual cores can handle UI rendering and file writing separately.
-- Use an **8 KB memory buffer for batch writing**; when the buffer is full, call `fwrite` once to write to Flash, greatly reducing system calls.
-- During saving, show a "Saving..." overlay to prevent further user operations; after saving completes, safely call back to the UI through `lvgl_port_lock` to display the result.
-- Use a **binary storage format** (6 bytes per pixel, including x/y coordinates and color value); data volume is about 1/3 of the text format, and writing is faster.
-
-### File Manager-Related Crashes
-
-- **Account list refresh crash**: selection state was not reset when refreshing the list, causing operations on destroyed objects and wild pointer access. Fix: reset selection state on refresh (see v4.2 improvements).
-- **File editor close crash**: the message box callback used `lv_obj_get_parent()` and obtained the wrong object hierarchy, causing access to an invalid address. Fix: use `lv_event_get_current_target()` to get the current event target (see v4.2 improvements).
-- **Memory leak**: dynamic memory in `user_data` was not released when clearing or destroying the account list. Fix: correctly release `user_data` (see v4.2 improvements).
-
-### Remember Password State Inconsistency
-
-**Symptom**: The "Remember Password" checkbox state on the login page is inconsistent with the credentials actually stored in NVS.
-
-**Cause and fix**: After successful login, the `is_remeber` state variable was not updated synchronously, causing mismatch between page state and stored data. Fix: synchronously update this variable after successful login (see v4.2 improvements). When "Remember Password" is unchecked, automatically clear saved account credentials in NVS (see v4.1 improvements).
-
-### System Settings Not Taking Effect
-
-**Symptom**: After modifying settings such as cursor size or screen-off time, the configuration is lost after reboot or the modification does not take effect immediately.
-
-**Cause and fix**: Parameters were not persisted to NVS, or related modules were not notified to refresh after modification. Fix: unified NVS read/write interfaces; after parameter changes, immediately write to NVS and broadcast refresh events.
-
-### Network Time Sync Failure
-
-**Symptom**: After Wi-Fi connects successfully, time is not synchronized, or after reconnection following disconnection, time is not updated.
-
-**Cause and fix**: After NTP sync completed, the desktop status bar was not updated; after reconnection, time was not automatically resynced. Fix: actively refresh display after sync completes; implement automatic reconnection and automatic resync after reconnection.
-
----
-
-## Troubleshooting
-
 This section is explained in detail by AI.
 
 ### 1: System Immediately Reboots After Creating a File
