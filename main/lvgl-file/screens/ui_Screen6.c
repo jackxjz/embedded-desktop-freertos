@@ -23,6 +23,9 @@
 // 绘图文件路径
 #define DRAWING_FILE "/spiffs/drawing.bin"
 
+// 调色板颜色数量(黑、红、绿、蓝、黄、橙)
+#define PALETTE_COLOR_COUNT 6
+
 // 文件头: 12 字节
 // [0..3] magic "DRAW"
 // [4..5] version (little-endian uint16)
@@ -47,6 +50,10 @@ static lv_color_t current_color = {0}; // 初始化为黑色（全0）
 
 // 当前选中的颜色按钮（用于取消高亮）
 static lv_obj_t *selected_color_btn = NULL;
+
+// 调色板颜色表（放在静态存储里：颜色按钮的 user_data 直接指向表中元素，
+// 不再逐个动态申请内存，也就不存在"退出界面时漏释放"的问题）
+static lv_color_t s_palette[PALETTE_COLOR_COUNT];
 
 // --------------------- 二进制绘图文件读写 ---------------------
 
@@ -351,7 +358,15 @@ static void unsaved_msgbox_cb(lv_event_t *e)
     if (btn_text && strcmp(btn_text, "不保存") == 0)
     {
         lv_msgbox_close(mbox);
-        ui_Screen3_screen_init(); // 回桌面
+        // 回桌面。ui_Screen3 在开机 ui_init() 时就已经建好了,
+        // 这里不能无条件再调 ui_Screen3_screen_init():
+        // 那会新建一整块 Screen3 并把旧对象丢掉,既泄漏界面对象,
+        // 又会让每进出一次绘图页就多出一个时间刷新定时器和一个顶层键盘。
+        if (ui_Screen3 == NULL) {
+            ui_Screen3_screen_init();
+        }
+        // 用不带过场动画的 lv_scr_load 立即切换,切换是同步完成的,
+        // 所以紧接着销毁 Screen6 不会误删动画里还被引用的旧屏幕。
         lv_scr_load(ui_Screen3);
         ui_Screen6_screen_destroy();
     }
@@ -372,7 +387,10 @@ void ui_event_exitbtu6(lv_event_t *e)
     {
         if (is_saving)
         {
-            ui_Screen3_screen_init(); // 回桌面
+            // 回桌面(同上:Screen3 已存在时不要重复初始化)
+            if (ui_Screen3 == NULL) {
+                ui_Screen3_screen_init();
+            }
             lv_scr_load(ui_Screen3);
             ui_Screen6_screen_destroy();
             is_saving = false;
@@ -424,16 +442,19 @@ void ui_Screen6_screen_init(void)
     lv_obj_add_event_cb(ui_exitbtu6, ui_event_exitbtu6, LV_EVENT_ALL, NULL);
 
     // --------------------- 颜色选择器（画布上方） ---------------------
-    // 定义颜色数组：黑、红、绿、蓝、黄、橙（使用 lv_color_hex）
-    lv_color_t colors[] = {
-        lv_color_hex(0x000000), // 黑
-        lv_color_hex(0xFF0000), // 红
-        lv_color_hex(0x00FF00), // 绿
-        lv_color_hex(0x0000FF), // 蓝
-        lv_color_hex(0xFFFF00), // 黄
-        lv_color_hex(0xFF8000)  // 橙
+    // 六色调色板:黑、红、绿、蓝、黄、橙
+    static const uint32_t palette_hex[PALETTE_COLOR_COUNT] = {
+        0x000000, // 黑
+        0xFF0000, // 红
+        0x00FF00, // 绿
+        0x0000FF, // 蓝
+        0xFFFF00, // 黄
+        0xFF8000  // 橙
     };
-    int color_count = sizeof(colors) / sizeof(lv_color_t);
+    // 换算成 LVGL 颜色值填入静态颜色表(用户可切换的只有这 6 种颜色)
+    for (int i = 0; i < PALETTE_COLOR_COUNT; i++) {
+        s_palette[i] = lv_color_hex(palette_hex[i]);
+    }
 
     // 创建颜色选择容器（水平排列）
     lv_obj_t *color_container = lv_obj_create(ui_Screen6);
@@ -447,21 +468,16 @@ void ui_Screen6_screen_init(void)
     lv_obj_set_style_pad_column(color_container, 8, LV_PART_MAIN);
 
     // 创建颜色按钮
-    for (int i = 0; i < color_count; i++)
+    for (int i = 0; i < PALETTE_COLOR_COUNT; i++)
     {
         lv_obj_t *btn = lv_btn_create(color_container);
         lv_obj_set_size(btn, 30, 30);
-        lv_obj_set_style_bg_color(btn, colors[i], LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(btn, s_palette[i], LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_radius(btn, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-        // 保存颜色值到 user_data（注意内存管理，这里使用静态分配）
-        lv_color_t *color_ptr = (lv_color_t *)lv_mem_alloc(sizeof(lv_color_t));
-        if (color_ptr)
-        {
-            *color_ptr = colors[i];
-            lv_obj_set_user_data(btn, color_ptr);
-        }
+        // 颜色值挂在按钮的 user_data 上,指向静态颜色表(无动态分配、无需释放)
+        lv_obj_set_user_data(btn, &s_palette[i]);
         lv_obj_add_event_cb(btn, color_btn_click_cb, LV_EVENT_CLICKED, NULL);
 
         // 默认选中黑色（第一个）
@@ -535,8 +551,17 @@ void ui_Screen6_screen_destroy(void)
     if (ui_Screen6 == NULL)
         return;
 
-    // 防止后台任务操作野指针
+    // 防止后台保存任务往一个正在销毁的界面上弹提示框:
+    // 先把标志清掉、把全局指针摘走,任务回来时看到 ui_Screen6 == NULL 就不弹了。
+    // (保存任务与这里都在 LVGL 锁内执行,不会真正并发)
     is_saving = false;
+    lv_obj_t *scr = ui_Screen6;
+    ui_Screen6 = NULL;
+
+    // 【顺序很关键】先删界面对象树,再释放画布缓冲。
+    // 画布对象内部保存着 canvas_buf 的指针,如果先 free 再删对象,
+    // 中间这段时间画布就是一块悬空指针。
+    lv_obj_del(scr);
 
     // 释放画布缓冲(注意:lv_canvas_set_buffer 后 LVGL 不拥有 buffer,需自己释放)
     if (canvas_buf != NULL)
@@ -544,10 +569,12 @@ void ui_Screen6_screen_destroy(void)
         free(canvas_buf);
         canvas_buf = NULL;
     }
+
+    // 清理其余全局状态
     last_point.x = -1;
+    selected_color_btn = NULL;
 
     // NULL screen variables
-    ui_Screen6 = NULL;
     ui_exitbtu6 = NULL;
     ui_canvas_draw = NULL;
     ui_btn_save_draw = NULL;
