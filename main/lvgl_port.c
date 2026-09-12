@@ -17,7 +17,9 @@
 #include "lvgl.h"
 #include "lvgl_port.h"
 #include "waveshare_rgb_lcd_port.h"   // 背光开关控制
-#include "wifi_sync.h"                 // 熄屏时间配置读写
+// 注意:本文件属于 BSP/适配层,不直接读写文件系统。
+// 熄屏时间由应用层(main.c)在 SPIFFS 挂载完成后通过
+// lvgl_port_set_screen_timeout() 注入。
 
 static const char *TAG_LVGL = "lv_port";                      // 日志输出标签
 static SemaphoreHandle_t lvgl_mux;                       // LVGL互斥锁（保证线程安全，因LVGL API非线程安全）
@@ -713,10 +715,12 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
     last_touch_time_ms = lv_tick_get();
     lv_timer_create(screen_timeout_timer_cb, 500, NULL);
 
-    // 从 SPIFFS 加载熄屏时间配置
-    int timeout_sec = screen_timeout_load();
-    screen_timeout_ms = timeout_sec * 1000;
-    ESP_LOGI(TAG_LVGL, "熄屏时间: %d 秒", timeout_sec);
+    // 熄屏时间此处只保留默认值(10 秒),不再读文件系统。
+    // 原因:SPIFFS 由应用层挂载,而 lvgl_port_init() 早于 SPIFFS 挂载执行,
+    // 在这里读配置必然失败并静默退回默认值(历史上"熄屏时间重启后不保持"就是这么来的)。
+    // 用户保存的值改由应用层在存储就绪后调用 lvgl_port_set_screen_timeout() 写入。
+    ESP_LOGI(TAG_LVGL, "熄屏时间: 默认 %d 秒(等待应用层加载用户配置)",
+             (int)(screen_timeout_ms / 1000));
 
     return ESP_OK;
 }

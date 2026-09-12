@@ -5,6 +5,7 @@
  */
 
 #include "waveshare_rgb_lcd_port.h"
+#include "lvgl_port.h"
 #include "ui.h"
 #include "wifi_sync.h"
 #include "buzzer.h"
@@ -37,6 +38,14 @@ void app_main()
 
     // 初始化蜂鸣器 PWM(从 SPIFFS 读取上次保存的音量)
     buzzer_init();
+
+    // 读取并应用上次保存的熄屏时间
+    // 【必须在 init_spiffs() 成功之后】熄屏时间保存在 SPIFFS 中,
+    // 若在挂载前读取会失败并静默退回默认值 10 秒,
+    // 表现为"设置好的熄屏时间重启后丢失"。
+    int saved_timeout = screen_timeout_load();
+    lvgl_port_set_screen_timeout(saved_timeout);
+    ESP_LOGI("app", "已加载熄屏时间: %d 秒", saved_timeout);
 
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe
