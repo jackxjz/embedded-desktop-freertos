@@ -56,25 +56,30 @@ void list_item_click_event(lv_event_t * e) {
     selected_account[MAX_ACCOUNT_LENGTH - 1] = '\0';
 }
 
-// 直接删除账号（无确认对话框）
+// 删除选中的账号
 void delete_btn_click_event(lv_event_t * e) {
     if (!selected_item || !selected_account[0]) {
         show_message_box("提示", "请先选择一个账号");
         return;
     }
     
-    // 直接删除账号，不显示确认对话框
-    delete_account_from_file(selected_account);
+    // 真正执行删除，并按实际结果给提示
+    // (以前无论删没删掉都提示"账号已删除"，把失败伪装成了成功)
+    bool ok = delete_account_from_file(selected_account);
     load_accounts_to_list();
     
     // 重置选中状态（load_accounts_to_list 中已重置，此处可省略）
     selected_item = NULL;
     selected_account[0] = '\0';
     
-    // 删除成功后蜂鸣器响一声
+    // 蜂鸣器响一声
     buzzer_beep();
     
-    show_message_box("成功", "账号已删除");
+    if (ok) {
+        show_message_box("成功", "账号已删除");
+    } else {
+        show_message_box("错误", "该账号不存在!");
+    }
 }
 
 // 从文件加载账号到列表
@@ -109,15 +114,32 @@ void load_accounts_to_list() {
     
     char line[MAX_ACCOUNT_LENGTH + MAX_PASSWORD_LENGTH + 2];
     while (fgets(line, sizeof(line), file)) {
-        // 去除换行符
-        line[strcspn(line, "\n")] = '\0';
-        
-        // 添加到列表
-        lv_obj_t * item = lv_list_add_btn(ui_AccountList, NULL, line);
+        // 只取这一行里逗号之前的"账号"部分。
+        // 【为什么必须这样做】文件里每行是"账号,密码"，而删除时要拿这个字符串
+        // 去和文件里的账号做 strcmp 比对。如果这里存的是整行
+        // ("账号,密码")，那么 delete_account_from_file() 里
+        // "账号" 与 "账号,密码" 永远不相等 → 每一行都会被原样保留 →
+        // 表现为"提示账号已删除，但账号还在"。这正是之前删除失效的原因。
+        // 顺带也解决了另一个问题：列表里不该把密码显示出来。
+        char name_only[MAX_ACCOUNT_LENGTH] = {0};
+        const char *comma = strchr(line, ',');
+        size_t name_len = comma ? (size_t)(comma - line) : strcspn(line, "\r\n");
+        if (name_len >= MAX_ACCOUNT_LENGTH) {
+            name_len = MAX_ACCOUNT_LENGTH - 1;   // 防御：账号异常超长时截断
+        }
+        memcpy(name_only, line, name_len);
+        name_only[name_len] = '\0';
+
+        if (name_only[0] == '\0') {
+            continue;                            // 跳过空行等格式异常的行
+        }
+
+        // 添加到列表(只放账号名，不显示密码)
+        lv_obj_t * item = lv_list_add_btn(ui_AccountList, NULL, name_only);
         // 复制账号名到 user_data（便于安全获取）
-        char *acc_copy = (char *)lv_mem_alloc(strlen(line) + 1);
+        char *acc_copy = (char *)lv_mem_alloc(strlen(name_only) + 1);
         if (acc_copy) {
-            strcpy(acc_copy, line);
+            strcpy(acc_copy, name_only);
             lv_obj_set_user_data(item, acc_copy);
         }
         lv_obj_add_event_cb(item, list_item_click_event, LV_EVENT_CLICKED, NULL);
@@ -133,7 +155,12 @@ void load_accounts_to_list() {
 }
 
 // 从文件中删除账号
-void delete_account_from_file(const char * account) {
+// 返回值:true = 确实删掉了一条记录;false = 没找到该账号(或文件打不开)
+bool delete_account_from_file(const char * account) {
+    if (account == NULL || account[0] == '\0') {
+        return false;
+    }
+
     FILE * src = fopen(FILE_PATH, "r");
     FILE * temp = fopen("/spiffs/temp.txt", "w");
     
@@ -141,17 +168,26 @@ void delete_account_from_file(const char * account) {
         ESP_LOGE("SPIFFS", "无法打开文件");
         if (src) fclose(src);
         if (temp) fclose(temp);
-        return;
+        return false;
     }
     
     char line[MAX_ACCOUNT_LENGTH + MAX_PASSWORD_LENGTH + 2];
+    int removed = 0;
     while (fgets(line, sizeof(line), src)) {
-        char existing_account[MAX_ACCOUNT_LENGTH];
-        sscanf(line, "%[^,],%*s", existing_account);
-        
-        // 如果不是要删除的账号，则写入临时文件
-        if (strcmp(existing_account, account) != 0) {
-            fputs(line, temp);
+        // 比对时同样只取逗号前的账号部分（用整行比对永远不可能相等）
+        char existing_account[MAX_ACCOUNT_LENGTH] = {0};
+        const char *comma = strchr(line, ',');
+        size_t name_len = comma ? (size_t)(comma - line) : strcspn(line, "\r\n");
+        if (name_len >= MAX_ACCOUNT_LENGTH) {
+            name_len = MAX_ACCOUNT_LENGTH - 1;
+        }
+        memcpy(existing_account, line, name_len);
+        existing_account[name_len] = '\0';
+
+        if (strcmp(existing_account, account) == 0) {
+            removed++;              // 命中要删除的账号：这一行不写进临时文件
+        } else {
+            fputs(line, temp);      // 其余账号原样保留
         }
     }
     
@@ -162,8 +198,12 @@ void delete_account_from_file(const char * account) {
     remove(FILE_PATH);
     rename("/spiffs/temp.txt", FILE_PATH);
 
+    ESP_LOGI("SPIFFS", "删除账号 %s: %s", account, (removed > 0) ? "成功" : "未找到");
+
     delete_save_account("acc");
     delete_save_account("pwd");
+
+    return (removed > 0);
 }
 
 // 退出按钮事件

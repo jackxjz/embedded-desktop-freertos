@@ -29,7 +29,8 @@ extern void list_item_click_event(lv_event_t * e);
 extern void delete_btn_click_event(lv_event_t * e);
 extern void delete_confirm_callback(bool confirmed, void *user_data);
 extern void load_accounts_to_list();
-extern void delete_account_from_file(const char * account);
+// 返回值:true = 确实删掉了一条记录;false = 没找到该账号
+extern bool delete_account_from_file(const char * account);
 extern void confirm_box_event_handler(lv_event_t * e);
 extern void show_confirm_box_nonblock(const char * title, const char * message, ConfirmCallback callback, void * user_data);
 extern void init_selected_style();
