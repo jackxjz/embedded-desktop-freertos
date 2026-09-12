@@ -113,6 +113,140 @@ static void lock_login_screen(void)
     lock_timer = lv_timer_create(lock_timer_cb, 1000, NULL);
 }
 
+// ---------------- 账号管理的管理员密码校验 ----------------
+
+// 进入"账号管理"所需的管理员密码。
+// 说明:
+//   1. 这是本地写死的常量,与"用户账户"是两回事——用户账户存在 SPIFFS 的 account.txt 里,
+//      而管理员密码只用于把关"账号管理"这个入口(里面能查看和删除所有账户)。
+//   2. 想改成可修改的密码:在设置页里把新密码写进 NVS 的 "admin" 键,
+//      这里改为"先读 NVS,读不到再用下面的默认值"即可。
+//   3. 涉及的中文文案只能使用中文字体 ui_font_Font1 里已有的字,否则会乱码
+//      (该字体是按需生成的子集,不含"员/验/证"等字)。
+#define ADMIN_PASSWORD "admin123"
+
+static lv_obj_t * admin_panel = NULL;      // 管理员密码验证面板
+static lv_obj_t * admin_ta = NULL;         // 管理员密码输入框
+
+// 关闭验证面板并收起键盘
+static void admin_panel_close(void)
+{
+    if (admin_panel != NULL) {
+        lv_obj_del(admin_panel);
+        admin_panel = NULL;
+        admin_ta = NULL;
+    }
+    if (ui_Keyboard1 != NULL) {
+        lv_obj_add_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// "确定":校验管理员密码,正确才进入账号管理界面
+static void admin_confirm_cb(lv_event_t * e)
+{
+    (void)e;
+    const char * input = (admin_ta != NULL) ? lv_textarea_get_text(admin_ta) : NULL;
+
+    // 空密码:提示后保留面板,让用户继续输入
+    if (input == NULL || input[0] == '\0') {
+        buzzer_beep();
+        show_message_box("错误", "密码不能为空!");
+        return;
+    }
+
+    // 密码错误:响一声、清空输入,保留面板供重试
+    if (strcmp(input, ADMIN_PASSWORD) != 0) {
+        buzzer_beep();
+        lv_textarea_set_text(admin_ta, "");
+        show_message_box("错误", "密码错误,请重试!");
+        return;
+    }
+
+    // 校验通过:关掉验证面板,进入账号管理界面
+    admin_panel_close();
+    load_accounts_to_list();
+    _ui_screen_change(&ui_Screen4, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen4_screen_init);
+}
+
+// "取消":直接关掉面板,返回登录页
+static void admin_cancel_cb(lv_event_t * e)
+{
+    (void)e;
+    admin_panel_close();
+}
+
+// 点击密码输入框时弹出软键盘
+static void admin_ta_clicked_cb(lv_event_t * e)
+{
+    (void)e;
+    if (ui_Keyboard1 != NULL && admin_ta != NULL) {
+        lv_obj_clear_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_Keyboard1, admin_ta);
+    }
+}
+
+// 弹出管理员密码验证面板(重复点击不会重复创建)
+static void show_admin_panel(void)
+{
+    if (admin_panel != NULL) {
+        return;
+    }
+
+    admin_panel = lv_obj_create(ui_Screen1);
+    lv_obj_set_size(admin_panel, 300, 180);
+    // 往上偏一些,避免和屏幕底部的软键盘重叠
+    lv_obj_align(admin_panel, LV_ALIGN_CENTER, 0, -60);
+    lv_obj_clear_flag(admin_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(admin_panel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(admin_panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(admin_panel, lv_color_hex(0x337ab7), LV_PART_MAIN);
+    lv_obj_set_style_border_width(admin_panel, 2, LV_PART_MAIN);
+
+    // 标题
+    lv_obj_t * title = lv_label_create(admin_panel);
+    lv_label_set_text(title, "管理密码");
+    lv_obj_set_style_text_font(title, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
+
+    // 密码输入框(密码模式,输入内容以圆点显示)
+    admin_ta = lv_textarea_create(admin_panel);
+    lv_obj_set_size(admin_ta, 200, 40);
+    lv_obj_align(admin_ta, LV_ALIGN_TOP_MID, 0, 40);
+    lv_textarea_set_placeholder_text(admin_ta, "请输入密码");
+    lv_textarea_set_one_line(admin_ta, true);
+    lv_textarea_set_password_mode(admin_ta, true);
+    lv_obj_set_style_text_font(admin_ta, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_add_event_cb(admin_ta, admin_ta_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    // 确定
+    lv_obj_t * btn_ok = lv_btn_create(admin_panel);
+    lv_obj_set_size(btn_ok, 70, 35);
+    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    lv_obj_clear_flag(btn_ok, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, "确定");
+    lv_obj_set_style_text_font(lbl_ok, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_ok);
+    lv_obj_add_event_cb(btn_ok, admin_confirm_cb, LV_EVENT_CLICKED, NULL);
+
+    // 取消
+    lv_obj_t * btn_cancel = lv_btn_create(admin_panel);
+    lv_obj_set_size(btn_cancel, 70, 35);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "取消");
+    lv_obj_set_style_text_font(lbl_cancel, &ui_font_Font1, LV_PART_MAIN);
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, admin_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    // 弹出软键盘并绑定到密码输入框
+    if (ui_Keyboard1 != NULL) {
+        lv_obj_clear_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+        lv_keyboard_set_textarea(ui_Keyboard1, admin_ta);
+    }
+}
+
 // event funtions
 void ui_event_zhanghao(lv_event_t * e)
 {
@@ -206,8 +340,8 @@ void ui_event_managebtu1(lv_event_t * e)
     lv_event_code_t event_code = lv_event_get_code(e);
 
     if(event_code == LV_EVENT_CLICKED) {
-        load_accounts_to_list();
-        _ui_screen_change(&ui_Screen4, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen4_screen_init);
+        // 进入账号管理之前,先要求输入正确的管理员密码
+        show_admin_panel();
     }
 }
 
@@ -401,6 +535,10 @@ void ui_Screen1_screen_destroy(void)
     is_locked = false;
     login_fail_count = 0;
     lock_remaining_seconds = 0;
+
+    // 管理员验证面板是 ui_Screen1 的子对象,随屏幕一起销毁,这里只需清指针
+    admin_panel = NULL;
+    admin_ta = NULL;
 
     // NULL screen variables
     ui_Screen1 = NULL;
