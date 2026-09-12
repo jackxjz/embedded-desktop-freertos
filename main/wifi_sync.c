@@ -24,6 +24,7 @@ static const char *TAG_WIFI = "wifi_sync";
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
+#define WIFI_RECONNECT_BIT  BIT2   // 断开事件置位,由后台任务负责延时重连
 
 static bool s_wifi_connected = false;
 static bool s_sntp_synced = false;
@@ -45,9 +46,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             s_wifi_connected = false;
             s_sntp_synced = false;
-            ESP_LOGI(TAG_WIFI, "WiFi 断开,5 秒后重连...");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            esp_wifi_connect();
+            // 【注意】本回调运行在 esp_event_loop_create_default() 的系统事件任务上,
+            // 绝对不能在这里 vTaskDelay:那会把整个事件循环冻住,期间所有事件
+            // (IP 事件、后续 WiFi 事件、其它组件的事件)都派发不出去。
+            // 这里只做"置位通知",真正的延时重连交给 wifi_sync_task 去做。
+            ESP_LOGI(TAG_WIFI, "WiFi 断开,交由后台任务重连");
+            xEventGroupSetBits(s_wifi_event_group, WIFI_RECONNECT_BIT);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
@@ -74,8 +78,6 @@ static void my_sntp_init(void)
 // WiFi + SNTP 任务
 static void wifi_sync_task(void *arg)
 {
-    s_wifi_event_group = xEventGroupCreate();
-
     // 初始化 TCP/IP 协议栈和 WiFi
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -124,15 +126,34 @@ static void wifi_sync_task(void *arg)
         ESP_LOGW(TAG_WIFI, "时间同步超时，后台将继续尝试");
     }
 
-    // 任务保持运行(后台自动重连)
+    // 常驻循环:只负责"被通知后延时重连"。
+    // 这里阻塞等待事件位,不占 CPU;延时发生在本任务上下文中,
+    // 不会再冻住系统事件循环。
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        EventBits_t ev = xEventGroupWaitBits(s_wifi_event_group,
+                                             WIFI_RECONNECT_BIT,
+                                             pdTRUE,      // 取出后自动清位
+                                             pdFALSE,
+                                             portMAX_DELAY);
+        if (ev & WIFI_RECONNECT_BIT) {
+            ESP_LOGI(TAG_WIFI, "5 秒后尝试重连...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            esp_wifi_connect();
+        }
     }
-    vTaskDelete(NULL);
+    // 上面的循环是死循环,正常不会走到这里
+    // vTaskDelete(NULL);
 }
 
 void wifi_sync_start(void)
 {
+    // 先创建事件组,再启动任务。
+    // 【顺序很重要】事件组的创建必须早于事件回调的注册:回调里会用到
+    // s_wifi_event_group,若任务还没跑到创建那一步就来了事件,
+    // xEventGroupSetBits(NULL, ...) 会直接崩。
+    s_wifi_event_group = xEventGroupCreate();
+    assert(s_wifi_event_group != NULL);
+
     // 创建任务运行 WiFi(需要较大栈空间)
     xTaskCreate(wifi_sync_task, "wifi_sync", 6 * 1024, NULL, 5, NULL);
 }
