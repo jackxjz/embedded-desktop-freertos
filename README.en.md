@@ -1,6 +1,6 @@
 # ESP32-Based Simple FreeRTOS Operating System
 
-[中文](README.md) | English
+Chinese | [English](README.en.md)
 
 This project is a FreeRTOS desktop simulator on an ESP32-S3 development board. It integrates a graphical user interface (LVGL), file system, network synchronization, power management, and other core functions, aiming to demonstrate the design capability of embedded multitasking systems and interactive applications.
 
@@ -8,7 +8,7 @@ This project is a work for the **2026 Electronic Science and Technology Associat
 
 ---
 
-## Assessment Requirements Overview
+## Assessment Requirements Cross-Reference Table
 
 ### About the Biggest Design Change
 
@@ -19,7 +19,7 @@ Due to limited development time, this work **does not include a self-made mouse,
 - It uses **long press (1000 ms)** as the equivalent of right-click, and **touch dragging** as the equivalent of mouse dragging;
 - It uses the **LVGL soft keyboard** for all text input.
 
-This trade-off is allowed in the assessment document ("input device form is customizable... or equivalent solutions"), and I will explain it item by item in the following requirements.
+This trade-off is allowed in the assessment document ("input device form is customizable... or equivalent solutions"). I will also explain it item by item in the following requirements.
 
 ### Basic Requirements
 
@@ -35,7 +35,7 @@ This trade-off is allowed in the assessment document ("input device form is cust
 | Show disconnected state when input device is not connected | N/A | Not implemented; there is no additional input device |
 | Input supports move/confirm/release/drag or equivalent | ✅ | Supports move, confirm, release, and drag (icon dragging) |
 | System settings: cursor sensitivity / cursor size / brightness / volume | ⚠️ | Implemented: cursor size (8–48 px), volume (0–100), screen-off timeout (10/20/30 s). **Not implemented: cursor sensitivity and screen brightness** (the cursor follows the touch point via LVGL, so cursor sensitivity is not considered; the backlight has no PWM dimming channel) |
-| Parameters are saved after modification and persist after reboot | ✅ | Settings parameters can persist |
+| Parameters persist after modification and reboot | ✅ | Cursor size, volume, and screen-off timeout all persist after reboot |
 | Manual screen-off + timeout screen-off + input wake-up | ✅ | Desktop has a manual "Screen Off" button; the timeout screen-off time is configurable |
 | After screen-off wake-up, returns to a reasonable state without reboot | ✅ | Screen-off only switches the backlight; UI objects are not destroyed, so after wake-up it stays on the original screen |
 
@@ -61,7 +61,7 @@ This trade-off is allowed in the assessment document ("input device form is cust
 ![ESP32-S3-Touch-LCD-7 Onboard Resources](https://docs.waveshare.net/assets/images/ESP32-S3-Touch-LCD-7-Intro1-1354f76103c5429920a42f7a5ca1dc7d.webp)
 
 | Item     | Specification                                                             |
-| -------- | -------------------------------------------------------------------------------- |
+| -------- | ---------------------------------------------------------------- |
 | Model     | ESP32-S3-Touch-LCD-7                                             |
 | Manufacturer     | Waveshare                                                 |
 | Processor   | High-performance Xtensa 32-bit LX7 dual-core processor, up to 240 MHz             |
@@ -93,6 +93,20 @@ This trade-off is allowed in the assessment document ("input device form is cust
 ## Development Log
 
 All software changes are recorded here.
+
+### v4.3
+
+#### Improvements
+
+- Fixed screen-off time not persisting after reboot: reading the configuration at boot occurred before SPIFFS was mounted, so it inevitably failed. Configuration reading is now moved to the application layer and executed after the file system is ready
+- Adjusted layering: the LVGL adaptation layer no longer directly reads/writes the file system; the screen-off time is injected by the application layer through an interface
+- Fixed UI object leaks caused by repeatedly entering and exiting the drawing app: the page object tree was not actually destroyed when exiting drawing, and the desktop page was recreated when returning to the desktop. It now creates on demand and destroys correctly
+- Fixed the release order of the drawing canvas buffer: previously the memory was freed before the canvas object was destroyed, leaving a dangling pointer window. It now destroys the object first and then frees the memory
+- Fixed a memory leak in the drawing palette color buttons: each color button previously allocated separate memory to store its color value and did not release it on exit; it now uses a static color table
+- Fixed repeated creation of the desktop page time-refresh timer and top-layer keyboard: after repeatedly entering and exiting the drawing app, multiple refresh timers and keyboard objects accumulated. The desktop page is no longer reinitialized when it already exists
+- Fixed drawing save succeeding only once: the flag controlling the save state was not reset when the background task ended, causing subsequent saves to be silently ignored and exit no longer prompting unsaved changes. It is now correctly reset at task end
+- Added a canvas "unsaved changes" flag: the exit confirmation box previously incorrectly relied on the "saving" flag; it now independently records whether the canvas has unsaved content and prompts only when there are changes
+- Unified the drawing page "back to desktop" logic into a single exit, eliminating duplicate code
 
 ### v4.2
 
@@ -360,13 +374,9 @@ buzzer_init();                       // volume is read here (order is correct, s
 
 `screen_timeout_load()` called inside `lvgl_port_init()` performs `fopen("/spiffs/screen_timeout.txt")`, but at this point SPIFFS **has not been mounted yet**, so `fopen` necessarily fails, and the function returns the default value `SCREEN_TIMEOUT_DEFAULT` (=10). In the whole project, only the Settings page (`ui_Screen5.c`) calls `lvgl_port_set_screen_timeout()`; the desktop and other screens do not reapply the saved value, so the screen-off time falls back to 10 seconds on every boot.
 
-**Solution** (choose one):
+**Solution**: In `main.c`, after `init_spiffs()` succeeds and before the boot screen, read the saved screen-off time and inject it into the lower layer; at the same time delete the original three lines of reading code in `lvgl_port_init()`, and remove the reference to `wifi_sync.h` in `lvgl_port.c`.
 
-1. Move `init_spiffs()` **before** `waveshare_esp32_s3_rgb_lcd_init()` (change two lines in `main.c`, easiest, but ensure SPIFFS and LVGL have no dependency conflict);
-2. Or explicitly call `lvgl_port_set_screen_timeout(screen_timeout_load());` once after `init_spiffs()`;
-3. Or delay `screen_timeout_load()` from inside `lvgl_port_init()` to the `ui_init()` stage.
-
-**Current status**: **Not fixed**; this is a **failing item** for assessment 3.2.1 "parameters must be saved after modification and retain the user's latest settings after reboot". It is recommended to handle this first.
+**Current status**: Fixed.
 
 ### 4: Message Box Close Button "×" Not Displayed / Chinese Garbled Text (Font Subset Recurrence)
 
@@ -407,13 +417,28 @@ buzzer_init();                       // volume is read here (order is correct, s
 1. `ui_Screen6_screen_destroy()` **does not call `lv_obj_del(ui_Screen6)`**; it only sets pointers such as `ui_Screen6` to NULL and calls `free(canvas_buf)`. That is, every time the drawing page is exited, **the entire Screen6 object tree (including the Canvas object, palette buttons, and color `user_data` allocated by `lv_mem_alloc`) is left in LVGL's object heap**, while the Canvas internally still holds a pointer to the already-`free`d buffer (dangling reference).
 2. The drawing page exit flow calls `ui_Screen3_screen_init()`, but Screen3 **was already created** during `ui_init()`. This call **creates an entire new Screen3 and overwrites the global pointer**; the old Screen3 and its `time_refresh_timer`, `ui_desktop_kb` (`lv_keyboard_create(lv_layer_top())`) all lose references; thus every time the drawing page is entered and exited, one more 1-second timer runs in the background and one more top-layer keyboard object accumulates.
 
+**Solution**: Adopt "truly destroy + create on demand", with three specific changes.
+
+1. Add `lv_obj_del(ui_Screen6)` in the destroy function, and adjust the order to "first delete the object tree, then free the canvas buffer" to avoid a dangling pointer in between; also clean up global states such as the selected button during destruction.
+2. Change the exit to "initialize only when `ui_Screen3 == NULL`", and reuse it when it already exists; still use the animation-free `lv_scr_load()` for immediate switching (instead of `_ui_screen_change()` with a 200 ms fade-in), because the switch completes synchronously and immediately destroying the old page will not mistakenly delete objects still referenced by the animation.
+3. Change palette color values to a static color table; the color buttons' `user_data` directly points to elements in the table instead of allocating each one with `lv_mem_alloc`, eliminating this leak at the source.
+
+**Current status**: Fixed.
+
+### 7: Drawing Save Succeeds Only Once, and Exit No Longer Prompts Unsaved Changes
+
+**Symptom**: The first drawing save works normally; afterward, clicking save again has no response and no result prompt; after that, exiting the drawing page no longer shows the "discard changes?" confirmation box.
+
+**Cause analysis**: The save-control state flag was used with two meanings—both "currently saving" and, in the exit logic, "canvas already saved". The flag was not reset when the background save task ended (the corresponding code was commented out), so after the first save it remained at "saving", causing two chained problems: the save button's duplicate-save check returned directly, silently ignoring subsequent saves; and the exit button always took the "saving" branch and returned directly to the desktop, completely skipping the unsaved-confirmation flow.
+
 **Solution**:
 
-1. Add `lv_obj_del(ui_Screen6)` inside `ui_Screen6_screen_destroy()` (delete the object **before** `free(canvas_buf)` to avoid the dangling buffer being drawn);
-2. Change the exit flow to `_ui_screen_change(&ui_Screen3, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, &ui_Screen3_screen_init)`—because `_ui_screen_change()` internally has `if (*target == NULL) target_init();`, when Screen3 already exists it **will not init again**, which is exactly the intended behavior;
-3. Or simply do not destroy Screen6 and make it resident like Screen1–5 (at the cost of about 300 KB PSRAM, which needs to be weighed).
+1. Reset the flag when the background save task ends, and place it outside the mutex, ensuring it can also be reset when the UI has been destroyed;
+2. Add an independent "canvas has unsaved changes" flag: set when drawing strokes and clearing the canvas, cleared after a successful save, and set again on write failure; the exit confirmation box now checks this flag;
+3. During saving, complete the canvas snapshot before clearing the flag, ensuring that "clearing" only happens on the foreground thread, avoiding the background task mistakenly marking newly drawn content as saved (this race at most causes the user to see the confirmation box once more; no data is lost);
+4. The drawing page's return-to-desktop logic is consolidated into a single exit.
 
-**Current status**: **Not fixed**; directly affects assessment item 3.2.3 "open and exit apps 30 times continuously".
+**Current status**: Fixed.
 
 ---
 
@@ -421,23 +446,20 @@ buzzer_init();                       // volume is read here (order is correct, s
 
 | # | Issue | Severity | Location | Affected Assessment Item |
 | --- | --- | --- | --- | --- |
-| 1 | Screen-off time does not restore on boot (read before SPIFFS mounted) | 🔴 High | `main/main.c:14,19`, `main/lvgl_port.c:717` | Settings persist after reboot |
-| 2 | Exiting drawing repeats `ui_Screen3_screen_init()` + Screen6 not `lv_obj_del` | 🔴 High | `ui_Screen6.c:344-357,368-394,533` | Open/close apps 30 times continuously |
-| 3 | `is_saving` not reset in save task → second save fails + exit no longer prompts unsaved changes | 🔴 High | `ui_Screen6.c:214,310,373` | Drawing save/clear test |
-| 4 | "Clear" button does not delete `drawing.bin`; if not saved after clearing, old drawing returns | 🟠 Medium | `ui_Screen6.c:340` | Drawing clear test |
-| 5 | No "boot screen" | 🟠 Medium | `main/lvgl-file/ui.c:70` | 3.2.1 first item |
-| 6 | Wi-Fi disconnect callback blocks event loop for 5 seconds | 🟠 Medium | `main/wifi_sync.c:49` | Stability |
-| 7 | File icon long press does not check slide movement | 🟠 Medium | `ui_Screen3.c:581-615` | High-frequency input test |
-| 8 | Message box button matrix font still Chinese subset (`×` may not display) | 🟡 Low | `main/lvgl-file/ui.c:112` | Appearance |
-| 9 | `delete_msgbox_cb` still uses `lv_obj_get_parent()` | 🟡 Low | `ui_Screen3.c:1277` | Stability risk |
-| 10 | Desktop clock shows 1970 before sync | 🟡 Low | `ui_Screen3.c:1329` | Appearance / status display |
-| 11 | `wifi_sync_get_time_str()` / `wifi_sync_is_connected()` are dead code | 🟡 Low | `main/wifi_sync.c:140,145` | Code cleanliness |
-| 12 | After registration, all account passwords are printed in plaintext | 🟡 Low | `ui_Screen2.c:94` | Security |
-| 13 | Buzzer prompt blocks LVGL task for 100 ms | 🟡 Low | `main/buzzer.c:108` | Performance |
-| 14 | Volume slider continues buzzing if RELEASED is not received | 🟡 Low | `ui_Screen5.c:103-109` | Edge case |
-| 15 | `save_draw` task priority (5) is higher than LVGL task (2) and not core-pinned | 🟡 Low | `ui_Screen6.c:327` | Residual flicker risk |
-| 16 | Snapshot `malloc(307KB)` does not use PSRAM attribute | 🟡 Low | `ui_Screen6.c:316` | Out-of-memory risk |
-| 17 | `WIFI_SSID`/`WIFI_PASSWORD` hardcoded in header | 🟡 Low | `main/wifi_sync.h:13-14` | Portability |
+| 1 | "Clear" button does not delete `drawing.bin`; if not saved after clearing, old drawing returns | 🟠 Medium | `ui_Screen6.c:340` | Drawing clear test |
+| 2 | No "boot screen" | 🟠 Medium | `main/lvgl-file/ui.c:70` | 3.2.1 first item |
+| 3 | Wi-Fi disconnect callback blocks event loop for 5 seconds | 🟠 Medium | `main/wifi_sync.c:49` | Stability |
+| 4 | File icon long press does not check slide movement | 🟠 Medium | `ui_Screen3.c:581-615` | High-frequency input test |
+| 5 | Message box button matrix font still Chinese subset (`×` may not display) | 🟡 Low | `main/lvgl-file/ui.c:112` | Appearance |
+| 6 | `delete_msgbox_cb` still uses `lv_obj_get_parent()` | 🟡 Low | `ui_Screen3.c:1277` | Stability risk |
+| 7 | Desktop clock shows 1970 before sync | 🟡 Low | `ui_Screen3.c:1329` | Appearance / status display |
+| 8 | `wifi_sync_get_time_str()` / `wifi_sync_is_connected()` are dead code | 🟡 Low | `main/wifi_sync.c:140,145` | Code cleanliness |
+| 9 | After registration, all account passwords are printed in plaintext | 🟡 Low | `ui_Screen2.c:94` | Security |
+| 10 | Buzzer prompt blocks LVGL task for 100 ms | 🟡 Low | `main/buzzer.c:108` | Performance |
+| 11 | Volume slider continues buzzing if RELEASED is not received | 🟡 Low | `ui_Screen5.c:103-109` | Edge case |
+| 12 | `save_draw` task priority (5) is higher than LVGL task (2) and not core-pinned | 🟡 Low | `ui_Screen6.c:327` | Residual flicker risk |
+| 13 | Snapshot `malloc(307KB)` does not use PSRAM attribute | 🟡 Low | `ui_Screen6.c:316` | Out-of-memory risk |
+| 14 | `WIFI_SSID`/`WIFI_PASSWORD` hardcoded in header | 🟡 Low | `main/wifi_sync.h:13-14` | Portability |
 
 ---
 
