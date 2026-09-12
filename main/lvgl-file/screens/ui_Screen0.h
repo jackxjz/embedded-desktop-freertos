@@ -12,7 +12,7 @@ extern "C" {
 #include "lvgl.h"
 
 // 当前系统版本号（全局唯一的版本来源，后续"系统更新"应用可直接引用这里）
-#define APP_VERSION_STR "4.4"
+#define APP_VERSION_STR "4.5"
 
 // SCREEN: ui_Screen0
 extern lv_obj_t * ui_Screen0;

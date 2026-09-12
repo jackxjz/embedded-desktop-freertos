@@ -84,7 +84,7 @@ This trade-off is allowed in the assessment document ("input device form is cust
 - **Graphical UI**: Boot screen, login/registration, desktop, account management, system settings, drawing app, and soft keyboard built on LVGL.
 - **File system**: SPIFFS supports file creation, deletion, editing, and uniqueness validation.
 - **Account management**: Local account registration/login, password error lockout mechanism, remember password (stored in NVS); the account management entry requires administrator password verification.
-- **Network sync**: Wi-Fi auto-connect, NTP time sync, reconnect after disconnection.
+- **Network sync**: Wi-Fi auto-connect and reconnect after disconnection, NTP time sync (primary/backup dual servers), automatic resync after network recovery.
 - **Power management**: Timeout auto screen-off + manual screen-off; screen-off time configurable (10/20/30 seconds).
 - **System settings**: Cursor size adjustment, NVS-persisted parameters, takes effect immediately.
 - **Multitasking**: FreeRTOS dual-core task partitioning (UI response, network background, power monitoring, etc.).
@@ -94,6 +94,19 @@ This trade-off is allowed in the assessment document ("input device form is cust
 ## Development Log
 
 All software changes are recorded here.
+
+### v4.5
+
+#### Improvements
+
+- Fixed the issue where deleting an account in Account Management did not work
+- Fixed the issue where the delete operation always prompted "Account deleted" regardless of success or failure: the delete function now returns the actual result, and when no match is found it truthfully prompts "Account does not exist!"
+- Fixed the issue where the account list displayed passwords in plaintext on the screen: the list now only shows account names
+- Fixed the issue where the time sync server configuration was invalid: the primary server was originally `pool.ntp.org` (slow DNS resolution in China, often unreachable), while the backup server `ntp.aliyun.com` was silently ignored by `sntp_setservername()` because of `CONFIG_LWIP_SNTP_MAX_SERVERS=1`, effectively leaving no backup; the primary server is now changed to `ntp.aliyun.com`, the backup to `cn.pool.ntp.org`, and the number of server slots is changed to 2
+- Fixed the issue where time sync lagged after network recovery: the SNTP client retries with doubling backoff after a failure, so after a long disconnection the backoff interval may already be very large, causing a long wait even right after reconnecting; now `sntp_restart()` is actively called every time an IP is obtained to skip the backoff and immediately resend the request
+- Fixed the issue where reconnection was too slow when Wi-Fi was not connected at boot: previously, during the two blocking waits of "wait up to 30 seconds for connection + wait up to 15 seconds for time sync", no reconnection was attempted, so the first reconnection had to wait about 47 seconds; now it is changed to a single resident supervision loop, so reconnection starts at most 2 seconds later, with a backoff strategy of 2/4/8/15 seconds, doubling and capped
+- Added reason-code logging for Wi-Fi connect and disconnect events, making it easier to identify the specific cause of "cannot connect" (201 AP not found, 15 handshake timeout, 2/205 authentication failure, 200 beacon timeout)
+- Removed the `WIFI_FAIL_BIT` macro that was never set
 
 ### v4.4
 
@@ -161,7 +174,7 @@ All software changes are recorded here.
 - 6-color brush palette (black, red, green, blue, yellow, orange); the current color is highlighted with a white border
 - Supports touch-slide continuous drawing: press to draw a point, drag to connect lines, release to stop; smooth drawing feel
 - Drawing content can be saved to SPIFFS; non-white pixels are compressed for storage to save space
-- Canvas clear function: one-tap reset to a white canvas. Clearing only changes the canvas content and does not delete the stored file.
+- Canvas clear function: one-tap reset to a white canvas. Clearing only changes the canvas content and does not delete the stored file
 - On app startup, automatically loads the last saved drawing content to achieve power-loss recovery
 - Complete page layout: title, exit, palette, plus "Save" at lower left and "Clear" at lower right
 
@@ -492,6 +505,51 @@ In this project, both the desktop container and the icon container have `LV_OBJ_
 
 **Current status**: Fixed.
 
+### 10: Deleting an Account in Account Management Does Not Work; It Says Success but the Account Is Still There
+
+**Symptom**: In the Account Management page, select an account and click "Delete". A prompt "Account deleted" pops up, but after closing the prompt the account is still in the list; after exiting the page and re-entering, or even after rebooting the device, the account still exists.
+
+**Cause analysis**: Each line of the account file `account.txt` has the format `account,password`, but the list saved the **entire line** when loading—it was used both as the list display text and stored in the list item's `user_data`, and after selection it became `selected_account`. The delete function, however, extracted only the **account part** from the file line using `%[^,]` before comparing. Therefore `strcmp("account", "account,password")` was never equal, no line was skipped in the loop, and the temporary file became a complete copy of the original file; the subsequent "delete original file + rename temporary file" was equivalent to restoring the original file as-is. In addition, the UI layer unconditionally popped up "Account deleted" after calling delete, disguising the failure as success and hiding the problem. Side effect: the account list displayed passwords in plaintext on the screen.
+
+**Solution**:
+
+1. When loading the list, extract and save only the account part before the comma, as the list display text and the list item's `user_data`; if no comma is found, fall back to the entire line (without the newline) with length clamping, and skip empty lines;
+2. Inside the delete function, compare only by the account part as well, skip the matching line, write the remaining lines to a temporary file, and finally replace the original file with the temporary file;
+3. The delete function now returns "whether a record was actually deleted", and the UI prompts "Account deleted" or "Account does not exist!" accordingly; at the same time, the previously uninitialized comparison buffer is now zeroed before filling, and serial logging is added for easier diagnosis.
+
+**Current status**: Fixed.
+
+### 11: The Device Cannot Connect to Wi-Fi for a Long Time; After Reboot It Takes a Long Time to Connect
+
+**Symptom**: Wi-Fi is always on, but after pressing reset to reboot the device it often fails to connect; sometimes waiting ten or twenty seconds still gives no response, looking like "completely unable to connect".
+
+**Cause analysis**: The reconnection mechanism existed but was delayed by two blocking waits. The original task flow was "wait up to 30 seconds for connection → initialize SNTP → wait up to 15 seconds for time sync → then enter the reconnection loop". That is, after the first connection attempt fails at boot, **the first reconnection only starts after about 47 seconds**, which subjectively feels like "cannot connect". In addition, after entering the reconnection loop, reconnection relied entirely on the `WIFI_EVENT_STA_DISCONNECTED` event; if a connection attempt failed but the event was not emitted (or was lost), the task would wait forever without trying again. Side issue: the disconnect event did not print a reason code, so it was impossible to tell whether the problem was signal, password, or authentication.
+
+**Solution**:
+
+1. Remove the two blocking waits and change to a single resident supervision loop, so reconnection starts at most 2 seconds later;
+2. Reconnection uses a backoff strategy: 2 s → 4 s → 8 s → 15 s capped, reset after successful connection, avoiding dense retries that may be rejected by the AP;
+3. Add a fallback watchdog: when neither connected nor disconnected event is received for about 30 consecutive seconds, actively initiate a connection, preventing "event lost means permanently stuck";
+4. The judgment basis is changed to the current connection state rather than simply event bits, avoiding the reconnection request being swallowed when "connected" and "pending reconnection" are set at the same time during a quick flicker;
+5. Print the Wi-Fi reason code in the disconnect event (201 AP not found, 15 handshake timeout, 2/205 authentication failure, 200 beacon timeout), making on-site diagnosis easier.
+
+**Current status**: Fixed; reason-code logging awaits on-site observation.
+
+### 12: No Network at Boot; After Connecting Later, Time Still Does Not Update
+
+**Symptom**: The router is not turned on when the device boots (or the hotspot is not ready), and the desktop time stays at 1970; afterward the router is turned on and the device connects to the network, but the time is still incorrect and does not recover for a long time.
+
+**Cause analysis**: The SNTP client itself retries with backoff after a failed request, so it is not "sync once and give up"; there are really two problems. First, the primary server was set to `pool.ntp.org`, which often resolves slowly or cannot be reached in China, while the backup server `ntp.aliyun.com` written at index 1 was silently ignored by `sntp_setservername()` because of `CONFIG_LWIP_SNTP_MAX_SERVERS=1` (that function returns directly when `idx >= SNTP_MAX_SERVERS`), meaning the primary server was unreliable and the backup server did not exist. Second, SNTP's failure retry interval doubles each time; when the device has no network for a long time, the backoff may already have grown large, so after network recovery it still takes a long time to resend the request, manifesting as "time does not update for a long time".
+
+**Solution**:
+
+1. Change the primary server to `ntp.aliyun.com` (good reachability in China), and the backup to `cn.pool.ntp.org`;
+2. Change `CONFIG_LWIP_SNTP_MAX_SERVERS` from 1 to 2, making the backup server actually effective;
+3. Every time an IP is obtained, if sync has not yet succeeded, actively call `sntp_restart()` to urge it once, skipping the backoff and immediately resending the request; this way both paths—"recovery after boot with no network" and "reconnection after disconnection"—automatically catch up on sync;
+4. In the sync-complete callback, print the specific date and time synchronized, making it easy to confirm the sync result directly on the serial port.
+
+**Current status**: Fixed.
+
 ---
 
 ## Known Issues List
@@ -509,6 +567,7 @@ In this project, both the desktop container and the icon container have `LV_OBJ_
 | 9 | Snapshot `malloc(307KB)` does not use PSRAM attribute | 🟡 Low | `ui_Screen6.c:316` | Out-of-memory risk |
 | 10 | `WIFI_SSID`/`WIFI_PASSWORD` hardcoded in header | 🟡 Low | `main/wifi_sync.h:13-14` | Portability |
 | 11 | Administrator password is a fixed constant in the header file, and the number of failed verification attempts is not limited | 🟡 Low | `ui_Screen1.c` | Security |
+| 12 | Deleting any account clears the "Remember Password" NVS credentials (does not distinguish whether it is the deleted account) | 🟡 Low | `ui_Screen4.c` | Behavior to be confirmed |
 
 ---
 
