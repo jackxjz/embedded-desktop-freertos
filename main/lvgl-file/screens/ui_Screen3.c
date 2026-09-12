@@ -41,6 +41,15 @@ static lv_coord_t desktop_press_start_x = 0;
 static lv_coord_t desktop_press_start_y = 0;
 #define DESKTOP_LONG_PRESS_MOVE_THRESHOLD 2    // 移动超过2像素就判定为滑动，禁止弹出桌面长按菜单
 
+// 图标长按/点击的滑动检测
+// LVGL 的 LONG_PRESSED 与 CLICKED 都不判断位移:只要按下期间没有"滚动对象"就会照发。
+// 本工程的桌面容器和图标都关掉了滚动(SCROLLABLE),所以滚动对象恒为空,
+// 结果就是"滑动后停住"照样触发长按、"滑动后松手"照样触发点击。
+// 因此必须自己记录按下期间的最大位移,用来区分"原地长按/点击"和"滑动"。
+static lv_coord_t icon_press_max_move = 0;     // 本次按下期间的最大位移(像素)
+#define ICON_LONG_PRESS_MOVE_THRESHOLD 2       // 超过2像素即视为滑动:滑动长按不弹菜单、也不进入拖动(与桌面阈值保持一致)
+#define ICON_CLICK_MOVE_THRESHOLD     12       // 超过12像素才视为"这不是一次点击":比长按阈值宽松得多,避免手指轻微抖动把点击吞掉
+
 // 新建文件对话框相关对象
 static lv_obj_t * newfile_panel = NULL;        // 新建文件面板
 static lv_obj_t * newfile_ta = NULL;           // 文件名输入框
@@ -359,6 +368,7 @@ static void refresh_file_icons(void)
     drag_in_progress = false;
     long_press_handled = false;
     desktop_press_moved = false;
+    icon_press_max_move = 0;
 
     // 加载保存的图标坐标
     load_icon_positions();
@@ -444,6 +454,7 @@ static void file_icon_pressed_cb(lv_event_t * e)
     dragging_icon = icon;
     drag_in_progress = false;
     long_press_handled = false;
+    icon_press_max_move = 0;      // 新的一次按下,位移从零开始统计
 
     lv_indev_t * indev = lv_indev_get_act();
     if (indev) {
@@ -457,12 +468,10 @@ static void file_icon_pressed_cb(lv_event_t * e)
     }
 }
 
-// 文件图标移动中:仅在已进入拖动模式时更新位置
+// 文件图标移动中:统计位移;仅在已进入拖动模式时更新位置
 static void file_icon_pressing_cb(lv_event_t * e)
 {
     lv_obj_t * icon = lv_event_get_current_target(e);
-    if (icon != dragging_icon) return;
-    if (!drag_in_progress) return;   // 未进入拖动模式,不更新位置
 
     lv_indev_t * indev = lv_indev_get_act();
     if (indev == NULL) return;
@@ -470,7 +479,20 @@ static void file_icon_pressing_cb(lv_event_t * e)
     lv_point_t p;
     lv_indev_get_point(indev, &p);
 
-    // 计算与按下时的位移
+    // 【必须放在下面两个 return 之前】记录本次按下期间的最大位移。
+    // 滑动时通常还没进入拖动模式,如果放到后面就会被提前 return 掉,
+    // 位移永远记不上,长按判断也就失效。
+    lv_coord_t moved_x = LV_ABS(p.x - drag_start_x);
+    lv_coord_t moved_y = LV_ABS(p.y - drag_start_y);
+    lv_coord_t moved = LV_MAX(moved_x, moved_y);
+    if (moved > icon_press_max_move) {
+        icon_press_max_move = moved;
+    }
+
+    if (icon != dragging_icon) return;
+    if (!drag_in_progress) return;   // 未进入拖动模式,不更新位置
+
+    // 计算与按下时的位移(带正负号,拖动要用)
     lv_coord_t dx = p.x - drag_start_x;
     lv_coord_t dy = p.y - drag_start_y;
 
@@ -500,7 +522,8 @@ static void file_icon_released_cb(lv_event_t * e)
 }
 
 // 文件图标单击:
-// - 若长按已被处理(拖动或弹出菜单),忽略本次 CLICKED
+// - 若长按已被处理(拖动、弹出菜单或滑动),忽略本次 CLICKED
+// - 若按下期间滑动超过点击阈值,也忽略(滑动不应被当成点击)
 // - 若是设置图标，执行选中/跳转逻辑
 // - 若当前图标已选中,再次单击则打开文件(打开后取消选中)
 // - 若未选中或选中的是其他图标,则选中当前图标
@@ -516,6 +539,17 @@ static void file_icon_clicked_cb(lv_event_t * e)
         dragging_icon = NULL;
         return;
     }
+
+    // 按下期间手指确实滑动过:不应被当成一次点击,
+    // 否则"在已选中的图标上滑一下再松手"会直接把文件打开。
+    // 这里用的阈值比长按宽松(12px),正常的轻点不会被误吞。
+    if (icon_press_max_move > ICON_CLICK_MOVE_THRESHOLD) {
+        drag_in_progress = false;
+        dragging_icon = NULL;
+        icon_press_max_move = 0;
+        return;
+    }
+
     dragging_icon = NULL;
 
     //  处理设置图标
@@ -575,6 +609,7 @@ static void file_icon_clicked_cb(lv_event_t * e)
 }
 
 // 文件图标长按:
+// - 如果按下期间滑动过，直接返回（滑动长按不做任何事）
 // - 如果是设置图标，直接返回（不弹出删除菜单）
 // - 已选中 → 弹出删除菜单
 // - 未选中 → 进入拖动模式(图标跟随手指)
@@ -582,6 +617,15 @@ static void file_icon_long_press_cb(lv_event_t * e)
 {
     lv_obj_t * icon = lv_event_get_current_target(e);
     const char * name = (const char *)lv_obj_get_user_data(icon);
+
+    // 按下期间滑动过:这不是"原地长按",不弹菜单也不进入拖动。
+    // 置上 long_press_handled,让随后的 CLICKED 也一并被忽略,
+    // 否则"滑动后停住再松手"会误触发选中/打开文件。
+    if (icon_press_max_move > ICON_LONG_PRESS_MOVE_THRESHOLD) {
+        long_press_handled = true;
+        drag_in_progress = false;
+        return;
+    }
 
     //  设置图标长按不处理
     if (name && strcmp(name, SETTINGS_ICON_NAME) == 0) {
@@ -1626,6 +1670,7 @@ void ui_Screen3_screen_destroy(void)
     drag_in_progress = false;
     long_press_handled = false;
     desktop_press_moved = false;
+    icon_press_max_move = 0;
     // 重命名相关清理
     rename_panel = NULL;
     rename_ta = NULL;

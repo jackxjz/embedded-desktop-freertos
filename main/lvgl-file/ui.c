@@ -59,6 +59,7 @@ void ui_init(void)
     // 初始位置设到屏幕中心(LVGL_PORT_H_RES/V_RES 在 lvgl_port.h 中定义)
     lv_obj_set_pos(ui_cursor, LVGL_PORT_H_RES / 2 - 8, LVGL_PORT_V_RES / 2 - 8);
 
+    ui_Screen0_screen_init();
     ui_Screen1_screen_init();
     ui_Screen2_screen_init();
     ui_Screen3_screen_init();
@@ -67,11 +68,13 @@ void ui_init(void)
     // 注意:ui_Screen6 不在开机时预创建(占用 PSRAM 约 300KB)
     // 按需从桌面"画图"图标跳转时由 _ui_screen_change 自动调用 init
     ui____initial_actions0 = lv_obj_create(NULL);
-    lv_disp_load_scr(ui_Screen1);
+    // 开机先显示启动界面;进度条走满后由 ui_Screen0 自己的定时器切到登录页
+    lv_disp_load_scr(ui_Screen0);
 }
 
 void ui_destroy(void)
 {
+    ui_Screen0_screen_destroy();
     ui_Screen1_screen_destroy();
     ui_Screen2_screen_destroy();
     ui_Screen3_screen_destroy();
