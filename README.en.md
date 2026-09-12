@@ -1,6 +1,6 @@
 # ESP32-Based Simple FreeRTOS Operating System
 
-Chinese | [English](README.en.md)
+English | [中文](README.md)
 
 This project is a FreeRTOS desktop simulator on an ESP32-S3 development board. It integrates a graphical user interface (LVGL), file system, network synchronization, power management, and other core functions, aiming to demonstrate the design capability of embedded multitasking systems and interactive applications.
 
@@ -26,8 +26,9 @@ This trade-off is allowed in the assessment document ("input device form is cust
 | Assessment Requirement | Status | Notes |
 | --- | --- | --- |
 | Developed with FreeRTOS | ✅ | 3 task types: `lvgl`, `wifi_sync`, `save_draw`. LVGL is protected by a **recursive mutex** `lvgl_mux` |
-| Power-on shows boot screen → password screen → desktop | ⚠️ | No boot screen; goes directly to the login page. After successful login, enters the desktop |
-| Password error prompt + lockout after consecutive errors | ✅ | Password errors 3 times will lock for 10 seconds. During lockout, the account/password input boxes, login/register/account management buttons are disabled, and the keyboard is hidden. The popup is rebuilt every second to form a countdown |
+| Power-on shows boot screen → password screen → desktop | ✅ | Boot screen, version number, and progress bar; fades into the login page after 1.5 seconds; enters the desktop after successful login |
+| Password error prompt + lockout after consecutive errors | ✅ | Password errors 3 times will lock for 10 seconds. During lockout, input boxes, login/register/account management buttons are disabled, and the keyboard is hidden; the popup is rebuilt every second to form a countdown |
+| Permission control for the account management entry | ✅ | Entering Account Management requires entering the administrator password first; wrong/empty input gives a prompt and buzzer feedback |
 | Desktop displays cursor, app icons, status information | ✅ | Includes cursor, file icons + "Settings" + "Drawing" icons, and date/time in the upper-right corner |
 | Create/delete files on desktop; duplicate names not allowed | ✅ | Long-press empty desktop → "New"; long-press selected file → "Delete"/"Rename"; duplicate-name validation exists |
 | Cursor moves without leaving screen bounds | ⚠️ | **Touch itself is limited by the screen's physical bounds**; the cursor follows the touch point via LVGL, so it naturally cannot go out of bounds. Icon drag positions are clamped to bounds |
@@ -76,13 +77,13 @@ This trade-off is allowed in the assessment document ("input device form is cust
 
 ### Other Peripherals
 
-- Passive buzzer (Fusheng Technology FUET-5020): uses electromagnetic sound generation, rated voltage 3V (operating voltage range 2V~4V), driving frequency 4kHz. SMD package (5×5×2.2mm), suitable for compact embedded designs. Maximum sound pressure level up to 75dB, operating current 110mA, stable operation in the -20℃ to +70℃ temperature range. Used for system event prompts, key feedback, alarm notifications, and other scenarios.
+- Buzzer (Fusheng Technology FUET-5020): uses electromagnetic sound generation, rated voltage 3V (operating voltage range 2V~4V), driving frequency 4kHz. SMD package (5×5×2.2mm), suitable for compact embedded designs. Maximum sound pressure level up to 75dB, operating current 110mA, stable operation in the -20℃ to +70℃ temperature range. Used for system event prompts, key feedback, alarm notifications, and other scenarios.
 
 ### Main Features
 
-- **Graphical UI**: Desktop, app icons, window manager, and soft keyboard built on LVGL.
+- **Graphical UI**: Boot screen, login/registration, desktop, account management, system settings, drawing app, and soft keyboard built on LVGL.
 - **File system**: SPIFFS supports file creation, deletion, editing, and uniqueness validation.
-- **Account management**: Local account registration/login, password error lockout mechanism, remember password (encrypted storage in NVS).
+- **Account management**: Local account registration/login, password error lockout mechanism, remember password (stored in NVS); the account management entry requires administrator password verification.
 - **Network sync**: Wi-Fi auto-connect, NTP time sync, reconnect after disconnection.
 - **Power management**: Timeout auto screen-off + manual screen-off; screen-off time configurable (10/20/30 seconds).
 - **System settings**: Cursor size adjustment, NVS-persisted parameters, takes effect immediately.
@@ -93,6 +94,22 @@ This trade-off is allowed in the assessment document ("input device form is cust
 ## Development Log
 
 All software changes are recorded here.
+
+### v4.4
+
+#### New
+
+- Added boot screen (Screen 0): on power-up, it first displays the `JackOS` logo, system version number, and a boot progress bar. After the progress bar fills, it fades into the login page, fulfilling assessment 3.2.1 "power-on shows boot screen"
+- Version number is uniformly provided by `APP_VERSION_STR` in the header (currently `4.4`), globally visible, ready for direct reuse by the future "System Update" app; changing the version only requires editing one place
+- All text on the boot screen uses ASCII and the Montserrat font, avoiding missing glyphs and garbled text caused by using an on-demand generated Chinese font subset
+- Added administrator password verification to the account management entry: tapping "Account Management" on the login page now requires entering the correct administrator password before entering. If the password is wrong or empty, a prompt and buzzer feedback are given; canceling stays on the login page
+
+#### Improvements
+
+- Fixed the issue where the Wi-Fi disconnect callback blocked the system event loop: the disconnect callback previously directly delayed for 5 seconds before reconnecting, and since that callback runs on the system event task, it froze the entire event loop; now the callback only posts a notification, and a background task handles the delayed reconnection
+- Adjusted the creation timing of the Wi-Fi event group: changed from inside the background task to before the task starts, eliminating the potential crash window where "the event precedes the creation of the event group"
+- Fixed the issue where long-pressing after sliding on an icon still mistakenly popped up the menu: LVGL's long-press and click events themselves do not check movement; now the maximum movement during the press is recorded manually, so after sliding, long-press no longer pops up the menu and no longer enters drag mode
+- Fixed the issue where sliding on a selected icon and releasing would mistakenly open the file: the click determination also includes movement checking, with a looser threshold than long press, to avoid slight finger jitter swallowing normal clicks
 
 ### v4.3
 
@@ -144,6 +161,7 @@ All software changes are recorded here.
 - 6-color brush palette (black, red, green, blue, yellow, orange); the current color is highlighted with a white border
 - Supports touch-slide continuous drawing: press to draw a point, drag to connect lines, release to stop; smooth drawing feel
 - Drawing content can be saved to SPIFFS; non-white pixels are compressed for storage to save space
+- Canvas clear function: one-tap reset to a white canvas. Clearing only changes the canvas content and does not delete the stored file.
 - On app startup, automatically loads the last saved drawing content to achieve power-loss recovery
 - Complete page layout: title, exit, palette, plus "Save" at lower left and "Clear" at lower right
 
@@ -382,7 +400,7 @@ buzzer_init();                       // volume is read here (order is correct, s
 
 **Symptom**: When Chinese in the message box displays normally, the close button "×" in the upper-right corner is blank; after changing the font to `LV_PART_ITEMS`, "×" appears, but Chinese becomes garbled. The commit message `fix(font): embed missing glyph data to prevent garbled text` **appeared three times** in the repository (`2d35adc`, `677d114`, `1240add`), indicating this is a recurring problem.
 
-**Cause analysis**: `lv_msgbox` consists of two parts—the title/body labels belong to `LV_PART_MAIN`, and the **button matrix (including the close button) belongs to `LV_PART_ITEMS`**. The Chinese font `ui_font_Font1` used by the project is a **subset font generated on demand**; its character set is explicitly listed by the `--symbols` parameter in the header of `main/lvgl-file/fonts/ui_font_Font1.c` (`--bpp 1 --size 20 --font ...simkai.ttf -r 0x20-0x7f --symbols 登录注册成功失败界面...`). It only contains "Chinese characters listed in the command + ASCII 0x20–0x7f", and **contains neither symbol glyphs such as `LV_SYMBOL_CLOSE` nor any new copy Chinese characters not listed in the command**. Therefore:
+**Cause analysis**: `lv_msgbox` consists of two parts—the title/body labels belong to `LV_PART_MAIN`, and the **button matrix (including the close button) belongs to `LV_PART_ITEMS`**. The Chinese font `ui_font_Font1` used by the project is a **subset font generated on demand**; its character set is explicitly listed by the `--symbols` parameter in the header of `main/lvgl-file/fonts/ui_font_Font1.c` (`--bpp 1 --size 20 --font ...simkai.ttf -r 0x20-0x7f --symbols 登录注册成功失败界面...`). It only contains "the Chinese characters listed in the command + ASCII 0x20–0x7f", and **contains neither symbol glyphs such as `LV_SYMBOL_CLOSE` nor any new copy Chinese characters not listed in the command**. Therefore:
 
 - Set with `LV_PART_MAIN` → Chinese normal, `×` missing;
 - Set with `LV_PART_ITEMS` → default font's `×` normal, Chinese missing;
@@ -440,33 +458,63 @@ buzzer_init();                       // volume is read here (order is correct, s
 
 **Current status**: Fixed.
 
+### 8: System Stutters for About 5 Seconds When Wi-Fi Disconnects
+
+**Symptom**: At the moment Wi-Fi disconnects, the UI and other network events show delayed responses for about 5 seconds; during this period, dragging icons and switching pages are noticeably sluggish.
+
+**Cause analysis**: The disconnect event callback directly executed "delay 5 seconds then reconnect". This callback runs on the system event task created by `esp_event_loop_create_default()`, and delaying inside it freezes the entire event loop, so all events during that period (IP events, subsequent Wi-Fi events, and events from other components) cannot be dispatched.
+
+**Solution**:
+
+- The disconnect callback now only sets a "pending reconnection" event flag and returns immediately, without any blocking operation;
+- The Wi-Fi background task blocks waiting for this flag, and performs the 5-second delay and reconnection call in its own task context;
+- At the same time, replace the task's original busy-wait keep-alive loop with the above waiting logic, avoiding meaningless periodic wake-ups;
+- The event group is created before the task starts, ensuring the order "event group is created before event callbacks are registered".
+
+**Current status**: Fixed.
+
+### 9: After Sliding on an Icon, Long Press Still Pops Up the Menu
+
+**Symptom**: The intention is "only long-pressing in place pops up the menu", but after sliding a distance on a file icon, stopping, and holding, the "Delete/Rename" menu still pops up; an unselected icon also mistakenly enters drag mode after sliding and long-pressing. In addition, sliding on a selected icon and releasing directly opens the file.
+
+**Cause analysis**: This is determined by LVGL's input event mechanism, not a wrong condition. Looking at LVGL 8.3's `lv_indev.c`:
+
+- `LV_EVENT_LONG_PRESSED` is only emitted when "there is no scrolling object" and the press exceeds the long-press time (around lines 919–931), and **does not check movement at all**;
+- `LV_EVENT_CLICKED` is likewise only emitted when "there is no scrolling object" (around lines 973–981), and **also does not check movement**.
+
+In this project, both the desktop container and the icon container have `LV_OBJ_FLAG_SCROLLABLE` cleared (so that "long press in place" can trigger stably), so the scrolling object is always empty, and both events are emitted as usual after sliding. The desktop blank area had previously been fixed by "recording press movement", but the file icon callback set missed the same handling.
+
+**Solution**:
+
+1. Continuously record the maximum finger movement during a single press. The statistics code must be placed **before** the early return for "whether to enter drag mode"; otherwise, movement will never be recorded in sliding scenarios;
+2. In the long-press callback, if movement exceeds a small threshold (2 pixels, consistent with the desktop blank area), return directly: do not pop up the menu, do not enter drag mode, and mark "long press already handled" to block the subsequent click;
+3. In the click callback, if movement exceeds a looser threshold (12 pixels), ignore this click, avoiding "sliding on a selected icon then releasing" being treated as opening the file; the looser threshold is to prevent slight finger jitter from swallowing normal taps.
+
+**Current status**: Fixed.
+
 ---
 
 ## Known Issues List
 
 | # | Issue | Severity | Location | Affected Assessment Item |
 | --- | --- | --- | --- | --- |
-| 1 | "Clear" button does not delete `drawing.bin`; if not saved after clearing, old drawing returns | 🟠 Medium | `ui_Screen6.c:340` | Drawing clear test |
-| 2 | No "boot screen" | 🟠 Medium | `main/lvgl-file/ui.c:70` | 3.2.1 first item |
-| 3 | Wi-Fi disconnect callback blocks event loop for 5 seconds | 🟠 Medium | `main/wifi_sync.c:49` | Stability |
-| 4 | File icon long press does not check slide movement | 🟠 Medium | `ui_Screen3.c:581-615` | High-frequency input test |
-| 5 | Message box button matrix font still Chinese subset (`×` may not display) | 🟡 Low | `main/lvgl-file/ui.c:112` | Appearance |
-| 6 | `delete_msgbox_cb` still uses `lv_obj_get_parent()` | 🟡 Low | `ui_Screen3.c:1277` | Stability risk |
-| 7 | Desktop clock shows 1970 before sync | 🟡 Low | `ui_Screen3.c:1329` | Appearance / status display |
-| 8 | `wifi_sync_get_time_str()` / `wifi_sync_is_connected()` are dead code | 🟡 Low | `main/wifi_sync.c:140,145` | Code cleanliness |
-| 9 | After registration, all account passwords are printed in plaintext | 🟡 Low | `ui_Screen2.c:94` | Security |
-| 10 | Buzzer prompt blocks LVGL task for 100 ms | 🟡 Low | `main/buzzer.c:108` | Performance |
-| 11 | Volume slider continues buzzing if RELEASED is not received | 🟡 Low | `ui_Screen5.c:103-109` | Edge case |
-| 12 | `save_draw` task priority (5) is higher than LVGL task (2) and not core-pinned | 🟡 Low | `ui_Screen6.c:327` | Residual flicker risk |
-| 13 | Snapshot `malloc(307KB)` does not use PSRAM attribute | 🟡 Low | `ui_Screen6.c:316` | Out-of-memory risk |
-| 14 | `WIFI_SSID`/`WIFI_PASSWORD` hardcoded in header | 🟡 Low | `main/wifi_sync.h:13-14` | Portability |
+| 1 | Message box button matrix font still Chinese subset (`×` may not display) | 🟡 Low | `main/lvgl-file/ui.c:112` | Appearance |
+| 2 | `delete_msgbox_cb` still uses `lv_obj_get_parent()` | 🟡 Low | `ui_Screen3.c:1277` | Stability risk |
+| 3 | Desktop clock shows 1970 before sync | 🟡 Low | `ui_Screen3.c:1329` | Appearance / status display |
+| 4 | `wifi_sync_get_time_str()` / `wifi_sync_is_connected()` are dead code | 🟡 Low | `main/wifi_sync.c:140,145` | Code cleanliness |
+| 5 | After registration, all account passwords are printed in plaintext | 🟡 Low | `ui_Screen2.c:94` | Security |
+| 6 | Buzzer prompt blocks LVGL task for 100 ms | 🟡 Low | `main/buzzer.c:108` | Performance |
+| 7 | Volume slider continues buzzing if RELEASED is not received | 🟡 Low | `ui_Screen5.c:103-109` | Edge case |
+| 8 | `save_draw` task priority (5) is higher than LVGL task (2) and not core-pinned | 🟡 Low | `ui_Screen6.c:327` | Residual flicker risk |
+| 9 | Snapshot `malloc(307KB)` does not use PSRAM attribute | 🟡 Low | `ui_Screen6.c:316` | Out-of-memory risk |
+| 10 | `WIFI_SSID`/`WIFI_PASSWORD` hardcoded in header | 🟡 Low | `main/wifi_sync.h:13-14` | Portability |
+| 11 | Administrator password is a fixed constant in the header file, and the number of failed verification attempts is not limited | 🟡 Low | `ui_Screen1.c` | Security |
 
 ---
 
 ## Future Update Plan
 
-1. **Add a boot screen**: add `ui_Screen0` (Logo + version number + progress bar), display it for 1–2 seconds after power-on, then `_ui_screen_change` to the login page. This also conveniently satisfies half of the "system update app needs to display version number" requirement, with a small change.
-2. **Add a system monitor app**: use `esp_timer_get_time()` for uptime, `xTaskGetTickCount()`, `uxTaskGetSystemState()` for task stack high-water marks, `esp_get_free_heap_size()` / `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` for remaining memory, plus two global counters "input event count/error count", and make a list page. It can also serve as the data source for a 60-minute stability test.
-3. **Add a log app**: define `log_add(event)` to write "login failure/file creation/file deletion/settings change/drawing save" to `/spiffs/syslog.txt` (ring overwrite); the log page reads in a `read_user_file` style + a "Clear" button. It can share an "app page" template with the monitor app.
-4. **Add screen brightness**: currently the backlight is a digital IO switch on CH422G and cannot dim. To satisfy this requirement, confirm whether the backlight enable pin can be changed to LEDC PWM output on the hardware; if not feasible, clearly state in the documentation "hardware limitation, replaced by manual/timeout screen-off" rather than leaving it blank.
-5. **Add fake OTA**: make a "System Update" page showing the version number (can first be a string constant), simulate download progress after clicking "Check for Updates", and write a new version marker in SPIFFS; after reboot the version number changes and a new app icon is unlocked—satisfying "fake OTA + observable difference after upgrade".
+1. **Add a system monitor app**: use `esp_timer_get_time()` for uptime, `xTaskGetTickCount()`, `uxTaskGetSystemState()` for task stack high-water marks, `esp_get_free_heap_size()` / `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` for remaining memory, plus two global counters "input event count/error count", and make a list page. It can also serve as the data source for a 60-minute stability test.
+2. **Add a log app**: define `log_add(event)` to write "login failure/file creation/file deletion/settings change/drawing save" to `/spiffs/syslog.txt` (ring overwrite); the log page reads in a `read_user_file` style + a "Clear" button. It can share an "app page" template with the monitor app.
+3. **Add screen brightness**: currently the backlight is a digital IO switch on CH422G and cannot dim. To satisfy this requirement, confirm whether the backlight enable pin can be changed to LEDC PWM output on the hardware; if not feasible, clearly state in the documentation "hardware limitation, replaced by manual/timeout screen-off" rather than leaving it blank.
+4. **Add fake OTA**: make a "System Update" page showing the version number (can first be a string constant), simulate download progress after clicking "Check for Updates", and write a new version marker in SPIFFS; after reboot the version number changes and a new app icon is unlocked—satisfying "fake OTA + observable difference after upgrade".

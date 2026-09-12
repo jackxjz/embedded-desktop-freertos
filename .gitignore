@@ -36,6 +36,7 @@ dependencies.lock
 # IDE / Editor
 # ============================================
 .vscode/
+.vscode/settings.json
 .idea/
 *.swp
 *.swo
@@ -60,3 +61,4 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+
