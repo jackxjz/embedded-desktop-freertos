@@ -45,6 +45,11 @@ static lv_point_t last_point = {-1, -1};
 // 保存状态（防止重复保存）
 static volatile bool is_saving = false;
 
+// 画布是否存在"尚未写入文件"的改动。
+// 这是退出确认框真正应该判断的东西:只有画布被画过/被清空过、
+// 且之后没成功保存,退出时才需要提醒用户。
+static volatile bool canvas_dirty = false;
+
 // 当前画笔颜色（默认黑色）
 static lv_color_t current_color = {0}; // 初始化为黑色（全0）
 
@@ -211,6 +216,12 @@ static void save_drawing_task(void *pv)
     // 回到 LVGL 线程安全地更新 UI
     if (lvgl_port_lock(-1))
     {
+        if (!ok)
+        {
+            // 写入失败:画布内容与文件不一致,重新标记为"有未保存改动",
+            // 这样用户退出时还能收到提醒,不会误以为已经存好了
+            canvas_dirty = true;
+        }
         if (ui_Screen6)
         { // 确保屏幕没被销毁
             if (ok)
@@ -218,9 +229,13 @@ static void save_drawing_task(void *pv)
             else
                 show_message_box("错误", "保存失败!");
         }
-        // is_saving = false;
         lvgl_port_unlock();
     }
+
+    // 复位"正在保存"标志。放在锁外,保证界面已被销毁(锁内代码被跳过)时也能复位,
+    // 否则这个标志会一直停在 true,导致后续再也保存不了。
+    is_saving = false;
+
     vTaskDelete(NULL);
 }
 
@@ -274,6 +289,9 @@ static void canvas_draw_event_cb(lv_event_t *e)
         last_point.x = -1;
         return;
     }
+
+    // 只要落笔落在画布上,画布内容就和文件不一致了
+    canvas_dirty = true;
 
     if (code == LV_EVENT_PRESSED)
     {
@@ -329,13 +347,20 @@ static void btn_save_draw_cb(lv_event_t *e)
     memcpy(buf_copy, canvas_buf, buf_size);
 
     is_saving = true;
+    // 快照已经拿到,即将写进文件的就是画布当前的样子,先按"已保存"看待;
+    // 之后用户若继续画,绘制回调会重新把它置为 true。
+    // 万一写失败,后台任务会再把它置回 true。
+    // 这样做还避免了"快照时刻已过、任务却还没写完"这段窗口里的状态歧义。
+    canvas_dirty = false;
 
     // 启动后台任务执行耗时写入，主线程立即返回，UI 不被阻塞
     xTaskCreate(save_drawing_task, "save_draw", 4096, buf_copy, 5, NULL);
 }
 
 /**
- * @brief 清除按钮：重置画布为白色，并删除绘图文件
+ * @brief 清除按钮：把画布重置为白色
+ *        只改画布内容,不删文件:清除本身也是一次"未保存的改动",
+ *        需要用户点保存才真正落盘;直接退出则下次进入会从文件恢复原图。
  */
 static void btn_clear_draw_cb(lv_event_t *e)
 {
@@ -344,7 +369,28 @@ static void btn_clear_draw_cb(lv_event_t *e)
         return;
     lv_canvas_fill_bg(ui_canvas_draw, lv_color_hex(0xFFFFFF), LV_OPA_COVER);
     last_point.x = -1;
+    // 清空后画布与文件不一致了
+    canvas_dirty = true;
     // remove(DRAWING_FILE);
+}
+
+/**
+ * @brief 退出绘图页并返回桌面(统一出口,避免多处重复同一段代码)
+ */
+static void drawing_exit_to_desktop(void)
+{
+    // ui_Screen3 在开机 ui_init() 时就已经建好了,这里不能无条件再调
+    // ui_Screen3_screen_init():那会新建一整块 Screen3 并把旧对象丢掉,
+    // 既泄漏界面对象,又会让每进出一次绘图页就多出一个时间刷新定时器
+    // 和一个顶层键盘。
+    if (ui_Screen3 == NULL)
+    {
+        ui_Screen3_screen_init();
+    }
+    // 用不带过场动画的 lv_scr_load 立即切换,切换是同步完成的,
+    // 所以紧接着销毁 Screen6 不会误删动画里还被引用的旧屏幕。
+    lv_scr_load(ui_Screen3);
+    ui_Screen6_screen_destroy();
 }
 
 // 未保存确认消息框按钮回调
@@ -358,17 +404,8 @@ static void unsaved_msgbox_cb(lv_event_t *e)
     if (btn_text && strcmp(btn_text, "不保存") == 0)
     {
         lv_msgbox_close(mbox);
-        // 回桌面。ui_Screen3 在开机 ui_init() 时就已经建好了,
-        // 这里不能无条件再调 ui_Screen3_screen_init():
-        // 那会新建一整块 Screen3 并把旧对象丢掉,既泄漏界面对象,
-        // 又会让每进出一次绘图页就多出一个时间刷新定时器和一个顶层键盘。
-        if (ui_Screen3 == NULL) {
-            ui_Screen3_screen_init();
-        }
-        // 用不带过场动画的 lv_scr_load 立即切换,切换是同步完成的,
-        // 所以紧接着销毁 Screen6 不会误删动画里还被引用的旧屏幕。
-        lv_scr_load(ui_Screen3);
-        ui_Screen6_screen_destroy();
+        // 放弃改动:不写文件,直接回桌面。下次进入会从文件重新加载。
+        drawing_exit_to_desktop();
     }
     else
     {
@@ -385,28 +422,31 @@ void ui_event_exitbtu6(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_CLICKED)
     {
+        // 正在后台保存:直接回桌面。
+        // 后台任务持有的是画布快照,退出后仍会把文件写完,所以不需要拦;
+        // 此时再弹"是否放弃修改"只会误导用户。
         if (is_saving)
         {
-            // 回桌面(同上:Screen3 已存在时不要重复初始化)
-            if (ui_Screen3 == NULL) {
-                ui_Screen3_screen_init();
-            }
-            lv_scr_load(ui_Screen3);
-            ui_Screen6_screen_destroy();
-            is_saving = false;
+            drawing_exit_to_desktop();
+            return;
         }
-        else
-        {
-            // 文件未保存关闭时，蜂鸣器响一声
-            buzzer_beep();
 
-            // 有未保存的修改,弹出确认框
-            static const char *btns[] = {"不保存", "取消", ""};
-            lv_obj_t *mbox = lv_msgbox_create(NULL, "提示", "画布未保存,是否放弃修改?", btns, false);
-            lv_obj_set_style_text_font(mbox, &ui_font_Font1, LV_PART_MAIN);
-            lv_obj_center(mbox);
-            lv_obj_add_event_cb(mbox, unsaved_msgbox_cb, LV_EVENT_CLICKED, NULL);
+        // 画布没有未保存的改动:直接退出,不打扰用户
+        if (!canvas_dirty)
+        {
+            drawing_exit_to_desktop();
+            return;
         }
+
+        // 文件未保存关闭时，蜂鸣器响一声
+        buzzer_beep();
+
+        // 有未保存的修改,弹出确认框
+        static const char *btns[] = {"不保存", "取消", ""};
+        lv_obj_t *mbox = lv_msgbox_create(NULL, "提示", "画布未保存,是否放弃修改?", btns, false);
+        lv_obj_set_style_text_font(mbox, &ui_font_Font1, LV_PART_MAIN);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, unsaved_msgbox_cb, LV_EVENT_CLICKED, NULL);
         return;
     }
 }
@@ -423,6 +463,9 @@ void ui_Screen6_screen_init(void)
 
     // 初始化当前颜色为黑色
     current_color = lv_color_hex(0x000000);
+
+    // 新界面刚建好、稍后会从文件加载上次的绘图,此刻还没有未保存的改动
+    canvas_dirty = false;
 
     // 标题
     lv_obj_t *title = lv_label_create(ui_Screen6);
@@ -555,6 +598,7 @@ void ui_Screen6_screen_destroy(void)
     // 先把标志清掉、把全局指针摘走,任务回来时看到 ui_Screen6 == NULL 就不弹了。
     // (保存任务与这里都在 LVGL 锁内执行,不会真正并发)
     is_saving = false;
+    canvas_dirty = false;
     lv_obj_t *scr = ui_Screen6;
     ui_Screen6 = NULL;
 
